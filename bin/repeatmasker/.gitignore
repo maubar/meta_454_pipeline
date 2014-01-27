@@ -1,0 +1,4 @@
+#Ignore
+*
+#Include
+!.gitignore
