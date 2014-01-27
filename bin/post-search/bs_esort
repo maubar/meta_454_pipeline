@@ -1,0 +1,34 @@
+#!/usr/bin/perl -w 
+
+use strict;
+
+my %entries;
+my $h, my $d;
+while (<>)
+{
+	if ( m/^>/ )
+	{
+		chomp;
+		$entries{ $h =~ m/^>(\S+)/ ? $1 : undef } = [$h, $d] if ( defined $h );
+		$h = $_; undef $d;
+	}
+	else
+	{
+		$d .= $_;
+	}
+}
+$entries{ $h =~ m/^>(\S+)/ ? $1 : undef } = [$h, $d] if ( defined $h );
+
+# get sorted keys
+my @ekeys = sort 
+{
+	my $ae, my $as, my $be, my $bs;
+	($ae, $as) = ($1, $2) if ($entries{$a}[1] =~ m/e=([\d\.\-e]+).+?s=([\d\.]+)/ );
+	($be, $bs) = ($1, $2) if ($entries{$b}[1] =~ m/e=([\d\.\-e]+).+?s=([\d\.]+)/ );
+	$ae = "1$ae" if ($ae =~ m/^e/);
+	$be = "1$be" if ($be =~ m/^e/);
+	if ($ae != $be) {$ae <=> $be} else {$bs <=> $as};
+} (keys %entries);
+
+# print entries in sorted order
+print $entries{$_}[0] . "\n" . $entries{$_}[1] . "\n" foreach (@ekeys);

@@ -1,0 +1,11 @@
+#!/bin/sh
+
+DB_NAME="human_genomic"
+
+./fasta/download
+echo "Splitting FASTA file..."
+./fasta/fsplit $DB_NAME
+rm $DB_NAME
+echo "Building database with formatdb..."
+formatdb -pF -t$DB_NAME -n$DB_NAME -i$DB_NAME.split
+rm $DB_NAME.split

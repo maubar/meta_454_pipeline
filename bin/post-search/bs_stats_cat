@@ -1,0 +1,39 @@
+#!/usr/bin/perl -w
+
+use strict;
+
+my @files = @ARGV;
+
+my %count; my $tseq = 0, my $tfrags = 0;
+foreach (@files)
+{
+	my $cat = ( m/([A-Z])(\.[^\.]+)?$/) ? $1 : undef;
+	open(F, $_) || die("ERROR: Unable to open $_ for input!\n");
+	while(<F>)
+	{
+		if ( m/^>/)
+		{
+			my $frags = ( m/(num_frags|nreads)=(\d+)/ ) ? $2 : 1;
+			++$count{$cat}[0]; 
+			++$tseq;			
+
+			$count{$cat}[1] += $frags; 
+			$tfrags += $frags;
+		}
+	}
+	close(F);
+}
+
+my %short2long = ("A" => "Ambiguous", "B" => "Bacterial", "E" => "Environmental", "M" => "Mammalian", "O" => "Other", "P" => "Phage", "U" => "Unknown", "V" => "Viral");
+my @keys = sort { $short2long{$a} cmp $short2long{$b} } (keys %count);
+
+print "#seq\treads\tname\n";
+printf "%d\t%d\t%s\n", $count{$_}[0], $count{$_}[1], $short2long{$_} foreach (@keys);
+#print "\n";
+
+#print "## split by reads\n";
+#printf "%s\t%d\t%.2f\n", lc($short2long{$_}), $count{$_}[1], $count{$_}[1] * 100 / $tfrags foreach (@keys);
+#print "\n";
+#print "## split by sequence\n";
+#printf "%s\t%d\t%.2f\n", lc($short2long{$_}), $count{$_}[0], $count{$_}[0] * 100 / $tseq foreach (@keys);
+#print "\n";

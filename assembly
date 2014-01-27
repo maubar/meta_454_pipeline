@@ -1,0 +1,825 @@
+#!/usr/bin/perl -w
+
+use strict;
+use File::Basename;
+use File::Spec qw(rel2abs abs2rel);
+use File::Path;
+
+
+#turn on autoflushing
+$| = 1;
+
+if (scalar @ARGV < 2)
+{
+	print("You must specify a project name and one or serveral SFF file(s) as command line arguments.\n");
+	exit(5);
+}
+
+my $proj_name = shift;
+my $min_left_clip = 7;
+my $key_length = 0;
+
+my $origin_name_length = 9;
+my $singlets_min_length = 80;
+my $sequence_min_length = 60;
+my $out_folder = "assembly-results";
+my $filter_folder = "filter";
+my $sff_extract_binary = "./bin/sff_extract";
+my $mira_binary = "./bin/mira";
+my $origin_file = "./bin/origin.txt";
+my $cpu_count = int(`grep -c processor /proc/cpuinfo`);
+my $auto_generate_454_filter_files = 0;
+
+my @pyro_files, my @sanger_files;
+
+
+my $pyro_fasta_file = $proj_name . "_in.454.fasta";
+my $pyro_qual_file = $pyro_fasta_file . ".qual";
+my $pyro_xml_file = $proj_name . "_traceinfo_in.454.xml";
+
+my $sanger_fasta_file = $proj_name . "_in.sanger.fasta";
+my $sanger_qual_file = "$sanger_fasta_file.qual";
+my $sanger_xml_file = $proj_name . "_traceinfo_in.sanger.xml";
+
+my %filter, my %fcounts;
+
+my $output_fasta = "$out_folder/$proj_name.fasta";
+if (-f $output_fasta)
+{
+	print "INFO: $output_fasta already exists, remove to re-calculate!\n";
+	print "DONE: All done, good bye!\n";
+	exit;
+}
+
+
+#
+# read input files
+#
+
+my $screen_stats_file = "$proj_name.screen.stats";
+my $library_stats_file = "$proj_name.library.stats";
+open(SCREEN_OUT, ">", "$out_folder/$screen_stats_file") || die("ERROR: Unable to open $screen_stats_file for output!\n");
+open(LIB_OUT, ">", "$out_folder/$library_stats_file") || die("ERROR: Unable to open $library_stats_file for output!\n");
+print LIB_OUT "#type\tname\treads\tflows/read\n";
+
+foreach my $file (@ARGV)
+{
+	my $type = $file =~ m/(data[\/\\](454|sanger))/ ? $2 : get_type_from_ext($file);
+	if ( $file =~  m/(454|sanger):{1,2}(.+)/ )
+	{
+		$type = $1;
+		$file = $2;
+	}
+
+	die("ERROR: Sequencing technology could not be determined for $file\n") if (! defined $type);
+
+	my $filter_file, my $namebase;
+	if ($type eq "454")
+	{
+		if (-f $file)
+		{
+			print "WARN: 454 file not given with .sff extension!\n" if (! $file =~  m/\.sff$/ );
+			push(@pyro_files, $file);
+
+			my $pyro_base = $file =~  m/([^\/\\]+)\.([^\.]+)$/ ? $1 : basename($file); 
+			$filter_file = "$filter_folder/$pyro_base.filter";
+			$namebase = $pyro_base;
+		}
+		else
+		{
+			print STDERR "ERROR: File not found: $file\n";
+			exit(15);
+		}
+
+		my $info = get_454_info($file);
+		print LIB_OUT "$type\t$namebase\t$info->{'reads'}\t$info->{'flows'}\n";
+		$key_length = $info->{'key-length'} if (defined $info->{'key-length'} && $info->{'key-length'} > $key_length);
+
+	}
+	elsif ($type eq "sanger")
+	{
+		# check for sanger files
+		my $sanger_base = ( $file =~ m/^(.+?)_+in\.sanger\.(fna|fasta)$/ )? $1 : $file; 
+		my $sanger_fasta_file = $sanger_base . "_in.sanger.fasta";
+		my $sanger_qual_file = $sanger_fasta_file . ".qual";
+		my $sanger_xml_file = $sanger_base . "_traceinfo_in.sanger.xml";
+
+		if (! -f $sanger_fasta_file || ! -f $sanger_qual_file || ! -f $sanger_xml_file)
+		{
+			print STDERR "ERROR: The following files were expected to be found, but were not:\n$sanger_fasta_file\n$sanger_qual_file\n$sanger_xml_file\n";
+			exit(15);
+		}
+		push(@sanger_files, [$sanger_fasta_file, $sanger_qual_file, $sanger_xml_file, $sanger_base]);
+
+		$filter_file = "$filter_folder/$sanger_base.filter";
+		$namebase = basename($sanger_base);
+
+		my $info = get_fasta_info($file);
+		print LIB_OUT "$type\t$namebase\t$info->{'reads'}\tNA\n";
+	}
+	else
+	{
+		print STDERR "ERROR: Unknown data type: $type\n";
+		exit(10);
+	}
+	$fcounts{$type} = 0 if (! defined $fcounts{$type});
+
+	if (defined $filter_file)
+	{	
+		if ($type eq "454" && $auto_generate_454_filter_files && ! -f $filter_file)
+		{
+			print "INFO: Generating filter file for $file\n";
+			system("./pre-assembly $file");
+		}
+		if (-f $filter_file)
+		{
+			print "INFO: Loading filter from $filter_file";
+			my $count = load_filter(\%filter, $filter_file);
+			print ", $count entries found\n";
+			$fcounts{$type} += $count;
+
+			printf SCREEN_OUT "%s\t%d\n", $namebase, $count;
+		}
+	}
+}
+
+printf SCREEN_OUT "total\t%d\n", scalar keys %filter;
+close(SCREEN_OUT);
+close(LIB_OUT);
+
+#
+# format input files
+#
+
+if (scalar @pyro_files)
+{
+	if (! -f "$out_folder/$pyro_fasta_file" || ! -f "$out_folder/$pyro_qual_file" || ! -f "$out_folder/$pyro_xml_file")
+	{
+		my $max_sff_extract_iterations = 3;
+		my $current_clip = $key_length >= $min_left_clip ? $key_length + 1 : $min_left_clip; # we need to remove at least key length characters
+		for (1..$max_sff_extract_iterations)
+		{
+			my $seln = "$sff_extract_binary --min_left_clip=$current_clip -s $out_folder/$pyro_fasta_file -q "
+				. "$out_folder/$pyro_qual_file -x $out_folder/$pyro_xml_file " . join(" ", @pyro_files);
+
+			print "INFO: Extracting sequence information from SFF file(s) using min-left-clip of $current_clip at " . get_timestamp() . "\n";
+
+			open(PIPE, "-|", "$seln");
+			my $new_clip;
+			while (<PIPE>)
+			{
+				$new_clip = $1 if ( m/--min_left_clip=(\d+)/ );
+			}
+			close(PIPE);
+
+			if (defined $new_clip && $new_clip != $current_clip)
+			{
+				print "WARN: Analasis of SFF files yeilds a better left-clip option of $new_clip (previous: $current_clip)\n";
+				$current_clip = $new_clip;
+			}
+			else
+			{
+				# no updated clip warning, break iteration
+				last;
+			}
+		}
+
+		my $typename = "454";
+		if ($fcounts{$typename})
+		{
+			print "INFO: Screening 454 input files with " . ($fcounts{$typename}) . " filter entries at " . get_timestamp() . "\n";
+
+			my $screen_fasta_out_file = $proj_name . "_screen_in.$typename.fasta";
+			my $screen_fasta_qual_out_file = $screen_fasta_out_file . ".qual";
+			my $screen_traceinfo_out_file = $proj_name . "_screen_traceinfo_in.$typename.xml";
+
+			# screening files and creating new output
+			screen_fasta("$out_folder/$pyro_fasta_file", "$out_folder/$screen_fasta_out_file", \%filter); 
+			screen_fasta("$out_folder/$pyro_qual_file", "$out_folder/$screen_fasta_qual_out_file", \%filter);
+			screen_xml("$out_folder/$pyro_xml_file", "$out_folder/$screen_traceinfo_out_file", \%filter);
+
+			# removing old files and rename new files into old names
+			unlink("$out_folder/$pyro_qual_file"); rename("$out_folder/$screen_fasta_qual_out_file", "$out_folder/$pyro_qual_file");
+			unlink("$out_folder/$pyro_fasta_file"); rename("$out_folder/$screen_fasta_out_file", "$out_folder/$pyro_fasta_file");
+			unlink("$out_folder/$pyro_xml_file"); rename("$out_folder/$screen_traceinfo_out_file", "$out_folder/$pyro_xml_file");
+		}
+	}
+	else
+	{
+		print "INFO: The project 454 out files already exists, remove to recalculate!\n";
+	}
+}
+if (scalar @sanger_files)
+{
+	print "INFO: Creating sanger project files at " . get_timestamp() . "\n";
+
+	if (! -f "$out_folder/$sanger_fasta_file" || ! -f "$out_folder/$sanger_qual_file" || ! -f "$out_folder/$sanger_xml_file")
+	{
+		# append all sanger files into corresponding sanger out files
+		my @outfiles = ($sanger_fasta_file, $sanger_qual_file, $sanger_xml_file), my @out;
+		open($out[$_], ">", "$out_folder/$outfiles[$_]") || die("ERROR: Unable to open $out_folder/$outfiles[$_] for output!\n") for (0..$#outfiles);
+		foreach my $file (@sanger_files)
+		{
+			for my $i (0..$#outfiles)
+			{
+				open(FILE, $file->[$i]) || die("ERROR: Unable to open $file->[$i] for input!\n");
+				print { $out[$i] } $_ while (<FILE>);
+				close(FILE);
+			}
+		}
+		close($_) foreach (@out);
+
+		my $typename = "sanger";
+		if ($fcounts{$typename})
+		{
+			print "INFO: Screening Sanger input files with " . ($fcounts{$typename}) . " filter entries at " . get_timestamp() . "\n";
+
+			my $screen_fasta_out_file = $proj_name . "_screen_in.$typename.fasta";
+			my $screen_fasta_qual_out_file = $screen_fasta_out_file . ".qual";
+			my $screen_traceinfo_out_file = $proj_name . "_screen_traceinfo_in.$typename.xml";
+
+			# screening files and creating new output
+			screen_fasta("$out_folder/$sanger_fasta_file", "$out_folder/$screen_fasta_out_file", \%filter); 
+			screen_fasta("$out_folder/$sanger_qual_file", "$out_folder/$screen_fasta_qual_out_file", \%filter);
+			screen_xml("$out_folder/$sanger_xml_file", "$out_folder/$screen_traceinfo_out_file", \%filter);
+
+			# removing old files and rename new files into old names
+			unlink("$out_folder/$sanger_qual_file"); rename("$out_folder/$screen_fasta_qual_out_file", "$out_folder/$sanger_qual_file");
+			unlink("$out_folder/$sanger_fasta_file"); rename("$out_folder/$screen_fasta_out_file", "$out_folder/$sanger_fasta_file");
+			unlink("$out_folder/$sanger_xml_file"); rename("$out_folder/$screen_traceinfo_out_file", "$out_folder/$sanger_xml_file");
+		}
+	}
+	else
+	{
+		print "INFO: The project Sanger out files already exists, remove to recalculate!\n";
+	}
+}
+
+
+
+#
+# run assembly
+#
+
+my $mira_ace_out_file = $proj_name . "_out.ace";
+if (! -f "$out_folder/$mira_ace_out_file")
+{
+	my $mira_main_folder = $proj_name . "_assembly";
+	my $mira_results_folder = "$mira_main_folder/$proj_name" . "_d_results";
+	my $miralog_file = "$proj_name.mira.assembly.log";
+
+	# only re-run MIRA if not already executed (could be executed from previous halt)
+	if (! -f "$out_folder/$mira_results_folder/$mira_ace_out_file")
+	{
+		my $current_dir = dirname(File::Spec->rel2abs($0));
+		my $abs_mira_binary = $mira_binary =~ m/^\.\// ? File::Spec->rel2abs($mira_binary) : $mira_binary;
+		my $miraparam = "-project=$proj_name -job=denovo,genome,accurate," . join(",", keys %fcounts) . " -OUT:ora=yes -SK:mnr=yes -GE:not=$cpu_count";
+
+		print "INFO: Running MIRA assembly at " . get_timestamp() . "\nINFO: MIRA parameters: $miraparam\n";
+		chdir($out_folder);
+		my $system_results = system("$abs_mira_binary $miraparam > $miralog_file");
+		my $mira_exit_code = $system_results != 0 ? $? : 0;
+		chdir($current_dir);
+
+		if ($mira_exit_code != 0)
+		{
+			print "ERROR: MIRA did not finish properly, (exit code: $mira_exit_code), "
+				. "please consult the MIRA assembly log file ($miralog_file) for further information\n";
+			print STDERR "DONE: Exiting with error at " . get_timestamp() . "\n";
+			exit($mira_exit_code);
+		}
+	}
+
+	if (-f "$out_folder/$mira_results_folder/$mira_ace_out_file")
+	{
+		# move relevant result files and clean up none-interesting files
+		rename("$out_folder/$mira_results_folder/$mira_ace_out_file", "$out_folder/$mira_ace_out_file");
+
+		# remove mira log file
+		unlink("$out_folder/$miralog_file") if (-f "$out_folder/$miralog_file");
+
+		# drop MIRA out folder
+		rmtree("$out_folder/$mira_main_folder");
+	}
+	else
+	{
+		print STDERR "ERROR: MIRA output file $out_folder/$mira_results_folder/$mira_ace_out_file not found!\n";
+		print STDERR "DONE: Exiting with error at " . get_timestamp() . "\n";
+		exit(2);
+	}
+}
+else
+{
+	print "INFO: MIRA output files already exists, remove to recalculate!\n";
+}
+
+
+my $ace_file = "$out_folder/$mira_ace_out_file";
+my $outfile = "$out_folder/$proj_name.fasta";
+
+
+#
+# process assembly output
+#
+
+# reading ACE file
+my %sequences; my %origin, my %allreads;
+
+print "INFO: Loading content and sample type information from $origin_file\n";
+load_origin_file(\%origin, $origin_file);
+
+print "INFO: Parsing ACE file calculating contig statistics and contig members\n";
+calculate_stats_with_ace($ace_file, \%sequences, \%allreads, \%origin);
+
+print "INFO: Reading all FASTA in files to extract single reads\n";
+my %singlets;
+foreach (("$out_folder/$pyro_fasta_file", "$out_folder/$sanger_fasta_file"))
+{
+	if (-f)
+	{
+		open(FILE, $_) || die("ERROR: Unable to open $_ for input!\n");
+		my $key;
+		while (<FILE>)
+		{
+			if ( m/^>([^\s]+)/ )
+			{
+				undef $key;
+				if (! defined $allreads{$1})
+				{
+					$key = $1;
+					$singlets{$key} = {'nreads' => 1};
+
+					my $oname = substr($key, 0, $origin_name_length);
+					if (defined $origin{$oname})
+					{
+						my ($type, $origin) = @{$origin{$oname}};
+						$singlets{$key}{'ctypes'} = {$type => 1};
+						$singlets{$key}{'corigins'} = {$origin => 1};
+					}
+				}
+			}
+			elsif (defined $key)
+			{
+				chomp;
+				$singlets{$key}{'sequence'} .= $_;
+			}
+		}
+		close(FILE);
+	}
+}
+
+# appply clips marked by lower-case characters and add to sequences
+my $singlets_count = 0;
+foreach (keys %singlets)
+{
+	$singlets{$_}{'sequence'} =~ s/^[a-z]+//;	
+	$singlets{$_}{'sequence'} =~ s/[a-z]+$//;
+	$singlets{$_}{'length'} = length $singlets{$_}{'sequence'};
+	
+	if ($singlets{$_}{'length'} >= $singlets_min_length)
+	{
+		$sequences{$_} = $singlets{$_};
+		++$singlets_count;
+	}
+}
+
+print "INFO: Writing output to out-file\n";
+open(OUT, ">", $outfile) || die("ERROR: Unable to open $outfile for output!\n");
+my $output_count = 0;
+foreach (sort { $sequences{$b}{'length'} <=> $sequences{$a}{'length'} } (keys %sequences))
+{
+	my $length = $sequences{$_}{'length'};
+	my $nreads = $sequences{$_}{'nreads'};
+
+	if ($length >= $sequence_min_length || $length >= $singlets_min_length)
+	{
+		# write header
+		print OUT ">$_ length=$length nreads=$nreads";
+	
+		# write contig stats if any
+		if (defined $sequences{$_}{'ccoverage'})
+		{
+			my ($mean, $low, $high) = @{$sequences{$_}{'ccoverage'}};
+			printf OUT " ccov=%.1f(%d-%d)", $mean, $low, $high;
+		}
+		if (defined $sequences{$_}{'ctypes'})
+		{
+			my %types = %{$sequences{$_}{'ctypes'}};
+			if (scalar keys %types)
+			{
+				print OUT " type=";
+				my @t; push(@t, scalar keys %types > 1 ? "$_($types{$_})" : $_) foreach (keys %types);
+				print OUT join(",", @t);
+			}
+		}
+		if (defined $sequences{$_}{'corigins'})
+		{
+			my %origins = %{$sequences{$_}{'corigins'}};
+			if (scalar keys %origins)
+			{
+				print OUT " origin=";
+				my @o; push(@o, scalar keys %origins > 1 ? "$_($origins{$_})" : $_) foreach (keys %origins);
+				print OUT join(",", @o);
+			}
+		}
+		if (defined $sequences{$_}{'csamples'})
+		{
+			my %samples = %{$sequences{$_}{'csamples'}};
+			if (scalar keys %samples)
+			{
+				print OUT " samples=";
+				my @s; push(@s, scalar keys %samples > 1 ? "$_($samples{$_})" : $_) foreach (keys %samples);
+				print OUT join(",", @s);
+			}
+		}
+
+		print OUT "\n";
+		process_output_fasta_data(*OUT, $sequences{$_}{'sequence'});
+
+		++$output_count;
+	}
+}
+close(OUT);
+
+#cleanup
+unlink ($pyro_fasta_file, $pyro_qual_file, $pyro_xml_file, $sanger_fasta_file, $sanger_qual_file, $sanger_xml_file);
+
+print "INFO: $singlets_count singlets and " . ($output_count - $singlets_count) . " contigs written to $outfile\n";
+print "DONE: All done, $output_count entries written, good bye!\n\n";
+
+
+
+#
+# FUNCTIONS
+#
+
+
+sub calculate_stats_with_ace
+{
+	my $ace_file = shift, my $contig_hash = shift, my $allreads_hash = shift, my $origin_hash = shift;
+
+	open(FILE, $ace_file) || die("ERROR: Unable to open $ace_file for input!\n");
+	my @c, my %r;
+	while (<FILE>)
+	{
+		if ( m/^CO ([^\s]+) \d+ (\d+)/ )
+		{
+			handle_ace_info(\@c, \%r, $contig_hash, $origin_hash) if (scalar @c && scalar values %r);
+
+			@c = ($1, $2);
+			undef %r;
+
+			# read sequence
+			my $data = "";
+			while (<FILE>)
+			{
+				last if ( m/^$/ );
+				chomp;
+				$data .= $_;
+			}
+		
+			$c[2] = [ split(//, $data) ];
+		}
+		elsif ( m/^AF ([^\s]+) (.) ([-\d]+)/)
+		{
+			my $name = $1;
+			$r{$name}{'name'} = $1;		
+			$r{$name}{'direction'} = $2;
+			$r{$name}{'start'} = $3;
+		
+			$allreads_hash->{$name} = 1;
+		}
+		elsif ( m/^RD ([^\s]+) (\d+)/)
+		{
+			my $name = $1;
+
+			# read sequence
+			my $data = "";
+			while (<FILE>)
+			{
+				last if ( m/^$/ );
+				chomp;
+				$data .= $_;
+			}
+
+			$r{$name}{'name'} = $name;
+			$r{$name}{'sequence'} = [ split(//, $data) ];
+		}
+	}
+	handle_ace_info(\@c, \%r, $contig_hash, $origin_hash) if (scalar @c && scalar values %r);
+	close(FILE);
+}
+
+sub handle_ace_info
+{
+	my $c = shift, my $rh = shift, my $result = shift, my $origins = shift;
+
+	my $contig_name = $c->[0];
+	my $contig_reads = $c->[1];
+	my @contig_sequence = @{$c->[2]};
+
+	my @coverage;
+	$coverage[$_] = 0 for (0..$#contig_sequence);
+
+	my %contig_types;
+	my %contig_origins;
+	my %contig_names;
+
+	foreach my $read (values %$rh)
+	{
+		if (! defined $read->{'sequence'} || ! defined $read->{'start'})
+		{
+			die "contig: $contig_name\nread: $read->{'name'} \n";
+		}
+
+		# calculate coverage
+		my $read_start = $read->{'start'};
+		my @read_sequence = @{ $read->{'sequence'} };
+		for (0..$#read_sequence)
+		{
+			my $pos = $read_start + $_;
+			if ($pos >= 0 && $pos <= $#contig_sequence)
+			{
+				++$coverage[$pos];
+			}
+		}
+
+		# fetch origin information
+		my $oname = substr($read->{'name'}, 0, $origin_name_length);
+		$contig_names{$oname} = (defined $contig_names{$oname})? $contig_names{$oname} + 1 : 1;
+		if (defined $origins->{$oname})
+		{
+			my ($type, $origin) = @{$origins->{$oname}};
+			$contig_types{$type} = (defined $contig_types{$type})? $contig_types{$type} + 1 : 1;
+			$contig_origins{$origin} = (defined $contig_origins{$origin})? $contig_origins{$origin} + 1 : 1;
+		}
+	}
+
+	my $unpadded_positions = 0;
+	my $sum_coverage = 0;
+
+	for (0..$#contig_sequence)
+	{
+		if (($contig_sequence[$_] ne '*') && ($contig_sequence[$_] eq uc($contig_sequence[$_])))
+		{
+			++$unpadded_positions;
+			$sum_coverage += $coverage[$_];
+		}
+	}
+
+	my $mean_coverage = $sum_coverage / $unpadded_positions;
+	my $low_coverage = $mean_coverage * 10000;
+	my $high_coverage = 0;
+
+	my $calc_center = 0.90;
+	my $start = int(($#contig_sequence+1) * (1-$calc_center)/2);
+	my $high = $start + int(($#contig_sequence+1)*$calc_center) - 1;
+
+	for ($start..$high)
+	{
+		$low_coverage = $coverage[$_] if ($coverage[$_] < $low_coverage);
+		$high_coverage = $coverage[$_] if ($coverage[$_] > $high_coverage);
+	}
+
+	my $cc; 
+	foreach (@contig_sequence)
+	{
+		$cc .= $_ if ($_ ne '*');
+	}
+
+	# set result
+	$result->{$contig_name}{"nreads"} = $contig_reads;
+	$result->{$contig_name}{"length"} = $unpadded_positions;
+	$result->{$contig_name}{"ccoverage"} = [$mean_coverage, $low_coverage, $high_coverage];
+	$result->{$contig_name}{"csamples"} = \%contig_names;
+	$result->{$contig_name}{"ctypes"} = \%contig_types;
+	$result->{$contig_name}{"corigins"} = \%contig_origins;
+	$result->{$contig_name}{"sequence"} = $cc;
+
+}
+
+
+sub load_filter
+{
+	my $hash = shift, my $file = shift, my $count = 0;
+
+	open(FILE, $file) || die("ERROR: Unable to open $file for input!\n");
+	while (<FILE>)
+	{
+		if ( m/^([^\s]+)/ && ! defined $hash->{$1})
+		{
+			++$count;
+			$hash->{$1} = 1;
+		}
+	}
+	close(FILE);
+
+	return $count;
+}
+
+sub load_origin_file
+{
+	my $hash = shift;
+	my $file = shift;
+
+	open(FILE, $file) || die("ERROR: Unable to open $file for input!\n");
+	while (<FILE>)
+	{
+		if ( ! m/^#/)
+		{
+			chomp;
+			my @p = split(/\t/);
+			my $k = shift @p;
+			$hash->{$k} = [@p];
+		}
+	}
+	close(FILE);
+}
+
+sub get_type_from_ext
+{
+	my $file = shift;
+	return "454" if ( $file =~ m/.sff$/ );
+	return "sanger" if ( $file =~ m/.(fasta|.fna)/ );
+	return undef;
+}
+
+
+
+sub screen_fasta
+{
+	my $in_file = shift;
+	my $out_file = shift;
+	my $filter_ref = shift;
+	my %filter= %{ $filter_ref };
+
+	open(FILE, "<$in_file") || die("ERROR: Unable to open $in_file for input.\n");
+	open(OUT, ">$out_file") || die("ERROR: Unable to open $out_file for output.\n");
+
+	print "INFO: Screening $in_file => $out_file ...";
+
+	my $data;
+	my $count = 0;
+	my $total_count = 0;
+	while (my $line = <FILE>)
+	{
+		if ($line =~ m/^>([^\s]+)/)
+		{
+			++$total_count;
+
+			my $id = $1;
+
+			# write previous entry, if any
+			if (defined $data)
+			{
+				print OUT $data;
+				++$count;
+			}
+
+			# check if new entry is in filter, if in filter do not write
+			if (! defined $filter{$id})
+			{
+				$data = $line;
+			}
+			else
+			{
+				undef $data;
+			}
+		}
+		elsif (defined $data)
+		{
+			$data .= $line;
+		}
+	}
+	# write last entry, if any
+	if (defined $data)
+	{
+		print OUT $data;
+		++$count;
+	}
+	close(OUT);
+	close(FILE);
+
+	print " $count/$total_count written.\n";
+}
+
+sub screen_xml
+{
+	my $in_file = shift;
+	my $out_file = shift;
+	my $filter_ref = shift;
+	my %filter = %{ $filter_ref };
+
+	open(FILE, "<$in_file") || die("ERROR: Unable to open $in_file for input.\n");
+	open(OUT, ">$out_file") || die("ERROR: Unable to open $out_file for output.\n");
+
+	print "INFO: Screening $in_file => $out_file ...";
+
+	my $data;
+	my $id;
+	my $in_trace_volume = 0;
+
+	my $count = 0;
+	my $total_count = 0;
+
+	while (my $line = <FILE>)
+	{
+		if ($in_trace_volume)
+		{
+			if ($line =~ m/<\/trace_volume>/)
+			{
+				print OUT $line;
+				$in_trace_volume = 0;
+			}
+			else
+			{
+				if ($line =~ m/<\/trace>/)
+				{
+					# check if new entry is in filter, if in filter do not write
+					if (defined $id && ! defined $filter{$id} )
+					{
+						print OUT "$data$line";
+						++$count;
+					}
+
+					$data = "";
+					++$total_count;
+				}
+				else
+				{
+					$data .= $line;
+					if ($line =~ m/<trace_name>([^<]+)<\/trace_name>/)
+					{
+						$id = $1;
+					}
+				}
+			}
+		}
+		else
+		{
+			print OUT $line;
+			if ($line =~ m/<trace_volume>/)
+			{
+				$in_trace_volume = 1;
+			}
+		}
+	}
+
+	close(OUT);
+	close(FILE);
+
+	print " $count/$total_count written.\n";
+}
+
+sub get_timestamp
+{	
+	my ($sec,$min,$hour,$mday,$mon,$year) = localtime(time);
+	return sprintf("%04d-%02d-%02d %02d:%02d:%02d", 
+		1900+$year, 1+$mon, $mday, $hour, $min, $sec);
+}
+
+sub process_output_fasta_data
+{
+	my $file = shift;
+	my $data = shift;
+	my $width = shift; $width = defined $width ? $width : 60;
+
+	my $p = 0;
+	while ($p < length($data))
+	{
+		print $file substr($data, $p, $width) . "\n";
+		$p += $width;
+	}
+}
+
+sub get_454_info
+{
+	my $file = shift;
+	my %r = ("reads" => 0, "flows" => 0, "key-length" => 4);
+
+	if (open(PROC,  "-|", "sffinfo $file  | head -n 13"))
+	{
+		while (<PROC>)
+		{
+			if ( m/^\s*# of ([^:]+):\s*(\d+)/)
+			{
+				$r{lc($1)} = $2;
+			}
+			elsif ( m/\s*([^:]+):\s*(\w+)/ )
+			{
+				(my $k, my $v) = (lc($1), $2); $k =~ s/\s+/-/; 
+				$r{$k} = $v;
+			}
+		}
+	}
+	close(PROC);
+	#print "$_\t$r{$_}\n" foreach (keys %r); die;
+	return \%r;
+}
+
+sub get_fasta_info
+{
+	my $file = shift;
+	return {"reads" => int(`grep '^>' -c $file`)};
+}
+

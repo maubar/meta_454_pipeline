@@ -1,0 +1,33 @@
+#!/usr/bin/perl -w
+
+use strict;
+use File::Basename;
+
+foreach (@ARGV)
+{
+	if ( m/(\.[^\.]+)$/ )
+	{
+		#my $out = substr($_, 0, -length($1)) . ".ld$1";
+		my $out = dirname($_) . "/[ld]/" . basename($_); mkdir(dirname($_) . "/[ld]/") if (! -d dirname($_) . "/[ld]/");
+
+		#read file
+		my @entries, my $i = -1;
+		open(FILE, $_) || die("ERROR: Unable to open $_ for input!\n");
+		while (<FILE>)
+		{
+			if ( m/^>/ )
+			{
+				++$i;
+				$entries[$i] = ["", m/length=(\d+)/ ? $1 : 0];
+			}
+			$entries[$i][0] .= $_;
+		}
+		close(FILE);
+		open(OUT, ">", $out) || die("ERROR: Unable to open $out for output!\n");
+		foreach (sort { $b->[1] <=> $a->[1] } (@entries))
+		{
+			print OUT $_->[0];
+		}
+		close(OUT);
+	}
+}

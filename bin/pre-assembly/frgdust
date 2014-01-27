@@ -1,0 +1,159 @@
+#!/usr/bin/perl -w
+
+use strict;
+use File::Basename;
+
+my $file = shift;
+if ( ! defined $file)
+{
+	print STDERR "Please supply a valid FRG file as a command line argument!\n";
+	exit(1);
+}
+
+my $masked_threshold = 0.70;					# maximum % of masked nucleotides in a sequence allowed
+
+my $exec_folder = dirname($0);
+my $frg2fasta = "$exec_folder/frg2fasta";
+my $dustmasker = "$exec_folder/dustmasker";
+
+
+
+open(P, "-|", "$frg2fasta $file | $dustmasker -outfmt fasta 2> /dev/null") || die("ERROR: Unable to open $file through $frg2fasta and $dustmasker!\n");
+open(FILE, $file) || die("ERROR: Unable to open $file for input!\n");
+my $fdata = [*P, undef];
+my $processed = 0, my $written = 0;
+while (<FILE>)
+{
+	if ( m/^{FRG/)
+	{
+		my $parts = get_frg_entry(*FILE);
+		my $acc = get_frg_part($parts, "acc");
+		my ($h, $d) = @{ get_fasta_entry($fdata) };
+		++$processed;
+
+		# validate entry read from dustmasker
+		if ($h !~ m/^>(\S+)/ || $1 ne $acc)
+		{
+			print STDERR "ERROR: Unmached sequence found, $acc expected in header: $h\n";
+			exit(7);
+		}
+
+		# get the number of lower case characters (masked nucleotides)
+		my $masked_nucl = $d =~ tr/a-z//, my $total_nucl = length($d);
+		if (($masked_nucl / $total_nucl) <= $masked_threshold)
+		{
+			++$written;
+			print_frg_entry("FRG", $parts);
+		}
+	}
+	else
+	{
+		print;
+	}
+}
+close(FILE);
+close(P);
+
+print STDERR "DONE: $written/$processed entries written, good bye!\n";
+
+
+sub get_fasta_entry
+{
+	my $fdata = shift;
+	my ($fh, $ll) = @$fdata; 
+	$fdata->[1] = undef;
+
+	my $h, my $d;
+	while (1)
+	{
+		my $ln = defined $ll ? $ll : <$fh>; undef $ll;
+		last if (! defined $ln);
+		if ($ln =~ m/^>/)
+		{
+			if (defined $h)
+			{
+				$fdata->[1] = $ln;
+				return [$h, $d];
+			}
+			chomp $ln;
+			$h = $ln;
+		}
+		else
+		{
+			chomp $ln;
+			$d .= $ln;
+		}
+	}
+	
+
+	return [$h, $d];
+}
+
+
+# writes the frg entry passed to stdout
+sub print_frg_entry
+{
+	my $name = shift, my $parts = shift, my $max_line_width = 70;
+
+	print "{$name\n";
+	foreach (@$parts)
+	{
+		my ($k, $v, $multiline) = @$_;
+		if (!$multiline)
+		{
+			print "$k:$v\n";
+		}
+		else
+		{
+			print "$k:\n";
+			my $len = length $v;
+			my $p = 0;
+			while ($p < $len)
+			{
+				# print a line
+				my $left = $len - $p;
+				my $plen = $left < $max_line_width ? $left : $max_line_width;
+	
+				print substr($v, $p, $plen) . "\n"; $p += $plen;
+			}			
+			print ".\n";
+		}
+	}
+	print "}\n";
+}
+
+sub get_frg_part
+{
+	my $parts = shift, my $key = shift;
+	foreach (@$parts) { return $_->[1] if ($_->[0] eq $key); }
+	return undef;
+}
+
+# reading a frg file entry from an frg file passed to the function
+sub get_frg_entry
+{
+	my $f = shift; my @r;
+
+	while (<$f>)
+	{
+		chomp;
+		last if ( m/^}$/ );
+		if ( m/([^:]+):(.+)$/ )
+		{
+			push(@r, [$1, $2, 0]);
+		}
+		elsif ( m/([^:]+):$/ )
+		{
+			my $k = $1, my $v = "";
+			while (<$f>)
+			{
+				chomp;
+				last if ( m/^\.$/);
+				$v .= $_;
+			}
+			push(@r, [$k, $v, 1]);
+		}
+
+	}
+	return \@r;
+}

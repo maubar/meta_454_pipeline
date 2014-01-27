@@ -1,0 +1,114 @@
+#!/usr/bin/perl -w
+
+use strict;
+
+#
+# settings
+#
+my $category_weight_threshold = 75;			# minimum category weight to accept main category (else ambigious "A)
+my $category_rel_weight_threshold = 2;		# or if cateogory weight is this much higher than the next best category
+
+my $min_hit_coverage = 0;			# minimum hit-coverage (in percent) to accept main category (else unknown "U")
+
+my $max_evalue = 1e-3;				# maximum e-value to accept main category (else unknown "U")
+
+
+
+#
+# fetch paramters
+#
+my $obase = shift;
+my $PIPE = *STDIN;
+open($PIPE, $ARGV[0]) || die("ERROR: Unable to open $ARGV[0] for input!\n") if (defined $ARGV[0] && -f $ARGV[0]);
+if (! defined $obase)
+{
+	print STDERR "Please supply a output-base as a command line argument!\n";
+	exit(2);	
+}
+
+
+#
+# read entries from pipe or file
+#
+my %ofiles, my $h, my $d;
+while (<$PIPE>)
+{
+	chomp;
+	if ( m/^>/)
+	{
+		analyze($h, $d, \%ofiles, $obase) if (defined $h && defined $d);
+		$h = $_; undef $d; 
+		#last if ($analyzed == 2);
+		next;
+	}
+	push(@$d, $_);
+}
+analyze($h, $d, \%ofiles, $obase) if (defined $h && defined $d);
+
+# close all output files
+close foreach (values %ofiles);
+
+# all done
+exit(0);
+
+
+
+
+
+
+
+
+#
+# functions
+#
+
+
+# main sub, analyzes the results of a single query sequence
+sub analyze
+{
+	my $h = shift, my $d = shift, my $ofiles = shift, my $obase = shift;
+	
+	my @cat = $h =~ m/cat=(\S+)/ ? split(/,/, $1) : ();
+	$cat[$_] = $cat[$_] =~ m/([A-Z])\(([\d\.]+)\)/ ? [$1, $2] : [undef, undef] for (0..$#cat);
+
+	# check category weight
+	my $cat = $cat[0][0];
+	if (scalar @cat > 1)
+	{
+		$cat = ($cat[0][1] > $category_weight_threshold || $cat[0][1] / $cat[1][1] > $category_rel_weight_threshold) ? $cat[0][0] : "A";
+	}
+	
+	# check hcoverage
+	if ($min_hit_coverage > 0 && $cat ne "A" && $cat ne "U")
+	{
+		my $hcov = $h =~ m/hcov=([\d\.]+)/ ? $1 : undef;
+		$cat = "U" if ($hcov < $min_hit_coverage);
+	}
+	
+	# check e-value
+	if ($cat ne "U")
+	{
+		my @best;
+		foreach (@$d)
+		{
+			if ( m/e=([\-e\d\.]+).*?,s=([\d\.]+)/ )
+			{
+				@best = ($1, $2); 
+				last;
+			}
+		}
+		$cat = "U" if ($best[0] >= $max_evalue);
+	}
+
+	# make sure out-file is open for output
+	if (! defined $ofiles->{$cat})
+	{
+		# open file
+		my $fh; open($fh, ">", "$obase.$cat.txt") || die("ERROR: Unable to open $obase.$cat.txt for output!\n");
+		$ofiles->{$cat} = $fh;
+	}
+
+	# print to out-file
+	print { $ofiles->{$cat} } "$h\n" . join("\n", @$d) . "\n";
+
+}

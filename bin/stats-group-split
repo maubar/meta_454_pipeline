@@ -1,0 +1,46 @@
+#!/usr/bin/perl -w
+
+use strict;
+
+use File::Basename;
+
+my $result_folder = shift;
+my $add_count_to_name = shift; $add_count_to_name = 1 if (! defined $add_count_to_name);
+
+if (! defined $result_folder)
+{
+	print "Please supply a pipeline result folder as a command line argument!\n";
+	exit;
+}
+$result_folder =~ s/[\/\\]+$//;
+
+my @result;
+
+my %name_lookup = (
+	"MAM" => "Mammals", 
+	"BCT" => "Bacteria", 
+	"VRL" => "Viruses", 
+	"OTR" => "Others", 
+	"UND" => "Undefined", 
+	"UNK" => "Unknown", 
+);
+
+my $total_count = 0;
+while (<$result_folder/results.*>)
+{
+	if (-f $_ && m/results\.([^.]+)/ && defined $name_lookup{$1})
+	{
+		my $name = $name_lookup{$1};
+		my $count = int(`grep '^>' -c $_`);
+		push(@result, [$name, $count]);
+		$total_count += $count;
+	}
+}
+
+if ($add_count_to_name)
+{
+	$_->[0] .= sprintf(" %.1f%% (%d)", 100 * $_->[1] / $total_count, $_->[1]) foreach (@result);
+}
+
+print "$_->[0]\t$_->[1]\n" foreach (sort { $b->[1] <=> $a->[1] } (@result));
+

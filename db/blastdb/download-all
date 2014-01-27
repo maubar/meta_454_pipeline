@@ -1,0 +1,16 @@
+#!/bin/sh
+
+ls | while read DIRECTORY
+do
+	if [ -f "$DIRECTORY/download" ]; then
+		#echo "INFO: Running download script $DIRECTORY/download\n"
+		cd $DIRECTORY
+		#(./download > /dev/null &)
+		./download
+		cd ..
+	fi
+	#echo "INFO: Waiting for downloads to finish\n"
+	#wait	
+done
+
+

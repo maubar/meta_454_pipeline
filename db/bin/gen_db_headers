@@ -1,0 +1,102 @@
+#!/usr/bin/perl -w
+
+use strict;
+
+my $blastdb = shift;
+my $taxdb = shift;
+my $write_only_first_gi_if_several = 1;
+
+if (! defined $blastdb || ! defined  $taxdb)
+{
+	print STDERR "Please supply a blastdb as well a a taxdb folder\n";
+	exit(1);
+}
+
+my $pln = "fastacmd -d$blastdb -D1 -cT";
+my $entries;
+
+print STDERR "INFO: Processing database!\n"; 
+
+# set autoflush to STDERR
+select((select(STDERR), $| = 1)[0]);
+
+open(P, "-|", $pln) || die("ERROR: Unable to launch process: $pln.\n");
+my $processed = 0;
+while (<P>)
+{
+	chomp;
+	if ( m/>(.+)/)
+	{
+		my $sheader = $1, my @gis;
+
+		push(@gis, $1) while ($_ =~ m/gi\|(\d+)/g);
+
+		# only use first non-redundant defline where chr(1) is the defline separator
+		if (index($sheader, chr(1)) >= 0)
+		{
+			my @sheaders = split(chr(1), $sheader);
+			# choose a header
+			my $dbr = -1;
+			foreach my $h (@sheaders)
+			{
+				my $rank = get_rank($h =~ m/gi\|\d+\|([^\|]+)/ ? $1 : undef);
+				if ($rank > $dbr) { $sheader = $h; $dbr = $rank; }
+			}
+		}
+
+		if ($sheader =~ m/gi\|(\d+)/)
+		{
+			my $sgi = $1;
+			push(@$entries, [$sgi, $sheader, \@gis]); ++$processed;
+			flush_entries($entries) if (scalar @$entries >= 50000);
+			print STDERR "\r$processed entries processed" if ($processed % 100000 == 0);
+		}
+		else
+		{
+			print STDERR "\rWARN: Missing GI, at $processed, in header: $sheader\n";
+		}
+	}
+}
+close(P);
+flush_entries($entries);
+
+print STDERR "\rDONE: All done, good bye!\n";
+exit(0);
+
+sub flush_entries
+{
+	my $entries = shift;
+	my $gi_file = "/tmp/gdh.gi2tax." . (time % 997) . "$$.gi"; open(O, ">$gi_file") || die("ERROR: Unable to open $gi_file for output!\n");
+	print O "$_->[0]\n" foreach (@$entries);
+	close(O);
+
+	system("$taxdb/gi2tax $gi_file $taxdb > /dev/null") == 0 or die "ERROR: Failed to launch $taxdb/gi2tax: $?\n";
+
+	open(F, $gi_file) || die("ERROR: Unable to open $gi_file for input!\n");
+	my $i = 0;
+	while (<F>)
+	{
+		chomp; 
+		my ($sgi, $sheader, $sgis) = @{$entries->[$i]};
+		my ($gi, $taxid, $div) = split(/\t/);
+	
+		die("ERROR: Mismatching GI found after processing, expected $sgi, found $gi in $gi_file\n") if ($sgi != $gi);
+
+		my $gi_list = $write_only_first_gi_if_several ? $sgis->[0] : join(",", @$sgis);
+		print "$gi_list\t$taxid\t$div\t$sheader\n";
+		++$i
+	}
+	close(F);
+
+	unlink($gi_file);
+
+	# clear entries
+	@$entries = ();
+}
+
+sub get_rank
+{
+	my $db = shift; return 1 if (! defined $db);
+	my %dbr = ("gb" => 5, "ref" => 5, "emb" => 5, "pir" => 4, "sp" => 2, "pdb" => 1);
+	return defined $dbr{$db} ? $dbr{$db} : 3;
+}

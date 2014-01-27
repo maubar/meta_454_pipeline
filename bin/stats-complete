@@ -1,0 +1,48 @@
+#!/usr/bin/perl -w
+
+use strict;
+
+use File::Basename;
+
+my $result_folder = shift;
+
+if (! defined $result_folder)
+{
+	print "Please supply a pipeline result folder as a command line argument!\n";
+	exit;
+}
+$result_folder =~ s/[\/\\]+$//;
+
+my @result;
+
+my $tsc = 0, my $trc = 0;
+while (<$result_folder/*.txt>)
+{
+	if (-f $_)
+	{
+		my $name = basename($_, ".txt");
+		$name = uc(substr($name, 0, 1)) . lc(substr($name, 1));
+		$name =~ s/\./ /g;
+		$name =~ s/([ds]s)dna/$1DNA/;
+		$name =~ s/([ds]s)rna/$1RNA/;
+
+		if (int(`head -n1 $_ | grep '^>' -c`))
+		{
+			my $count = int(`grep '^>' -c $_`);
+			my $nreads = int(`grep -P -o '(?<=nreads=)\\d+' $_ | awk '{ SUM += \$1} END { print SUM }'`);
+
+			push(@result, [$name, $count, $nreads]);
+			$tsc += $count;
+			$trc += $nreads;
+		}
+	}
+}
+
+#foreach (@result)
+#{
+#	@$_ = ($_->[0], $_->[1], sprintf("%.2f", $_->[1] * 100 / $tsc), $_->[2], sprintf("%.2f", $_->[2] * 100 / $trc))
+#}
+
+
+print join("\t", @$_) . "\n" foreach (sort { $b->[1] <=> $a->[1] } (@result));
+

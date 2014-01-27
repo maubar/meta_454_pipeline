@@ -1,0 +1,69 @@
+#!/usr/bin/perl -w
+
+use strict;
+
+use File::Basename;
+
+if (scalar @ARGV == 0)
+{
+	print STDERR "Please supply a result files as a command line argument!\n";
+	exit 2;
+}
+
+my %scount, my %rcount, my $tsc = 0, my $trc = 0;
+
+my %name_lookup = (
+	"MAM" => "Mammals", 
+	"BCT" => "Bacteria", 
+	"VRL" => "Viruses", 
+	"OTR" => "Others", 
+	"UND" => "Undefined", 
+	"UNK" => "Unknown", 
+);
+
+foreach (@ARGV)
+{
+	if (-f $_)
+	{
+		my $name = basename($_, ".txt");
+		if ($name =~ m/results-([A-Z]{3})/)
+		{
+			$name = $name_lookup{$1};
+		}
+		else
+		{
+			$name = uc(substr($name, 0, 1)) . lc(substr($name, 1));
+			$name =~ s/\./ /g;
+			$name =~ s/([ds]s)dna/$1DNA/;
+			$name =~ s/([ds]s)rna/$1RNA/;
+		}
+
+		# reading count/reads from file
+		my $count = 0, my $reads = 0;
+		open(FILE, $_) || die("ERROR: Unable to open $_ for input!\n");
+		while (<FILE>)
+		{
+			if ( m/^>/ )
+			{
+				++$count;
+				$reads += ( m/ nreads=(\d+)/ ? int($1) : 0);
+			}
+		}
+		close(FILE);
+		
+		# add count/reads to hash
+		if ($count)
+		{
+			$scount{$name} += $count; $tsc += $count;
+			$rcount{$name} += $reads; $trc += $reads;
+		}
+	}
+}
+
+print "#sequence counts\n";
+printf "$_ %.2f%% ($scount{$_})\t$scount{$_}\n", $scount{$_} * 100 / $tsc foreach (sort keys %scount);
+if ($trc)
+{
+	print "#reads counts\n";
+	printf "$_ %.2f%% ($rcount{$_})\t$rcount{$_}\n", $rcount{$_} * 100 / $trc foreach (sort keys %rcount);
+}

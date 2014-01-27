@@ -1,0 +1,33 @@
+#!/bin/sh
+
+wget ftp://ftp.ncbi.nih.gov/pub/taxonomy/gi_taxid_nucl.zip
+wget ftp://ftp.ncbi.nih.gov/pub/taxonomy/gi_taxid_prot.zip
+wget ftp://ftp.ncbi.nih.gov/pub/taxonomy/taxdmp.zip
+
+echo "Extracting files..."
+unzip -o gi_taxid_nucl.zip
+unzip -o gi_taxid_prot.zip
+unzip -o taxdmp.zip
+
+echo "Removing zip files..."
+rm gi_taxid_nucl.zip
+rm gi_taxid_prot.zip
+rm taxdmp.zip
+
+echo "Re-new extract nodes..."
+ls extract.*.nodes | while read EXTRACT_FILE
+do
+	./extract ${EXTRACT_FILE}
+done
+
+echo "Running gi2tax to format gi2tax databases"
+ls gi_taxid_*.dmp | while read FILE
+do 
+	LINE="./gi2tax $FILE --format"
+	echo $LINE
+	$LINE
+done
+
+echo "Generating subsets"
+./generate-out class 2 > extract.bacteria-class.out
+./generate-out class 10239 > extract.virus-class.out

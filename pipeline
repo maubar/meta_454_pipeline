@@ -1,0 +1,95 @@
+#!/usr/bin/perl -w
+
+use strict;
+use File::Basename;
+
+if (scalar @ARGV < 2)
+{
+	print("You must specify a project name and one or serveral SFF file(s) as command line arguments.\n");
+	exit(5);
+}
+
+my $proj_name = shift;
+my @in_files = @ARGV;
+my $err, my $ln;
+
+my $filter_folder = "filter";
+my $assembly_out_file = "assembly-results/$proj_name.fasta";
+my $search_out_folder = "result/$proj_name";
+
+# generate filter files for 454 data if not already present
+foreach my $file (@in_files)
+{
+	my $type = $file =~ m/(data[\/\\](454|sanger))/ ? $2 : get_type_from_ext($file);
+	if (-f $file && $type eq "454")
+	{
+		my $pyro_base = $file =~  m/([^\/\\]+)\.([^\.]+)$/ ? $1 : basename($file);
+		my $filter_file = "$filter_folder/$pyro_base.filter";
+
+		if (! -f $filter_file)
+		{
+			print "INFO: Generating filter file for $file at " . get_timestamp() . "\n";
+			if ($err = system("./pre-assembly $file"))
+			{
+				print "ERROR: Error produced by assembly pipeline (erno: $err)\n";
+				exit($err);
+			}
+		}
+	}
+}
+
+print "INFO: Running assembly for $proj_name at " . get_timestamp() . "\n";
+$ln = "./assembly $proj_name " . join(" ", @in_files);
+print "$ln\n";
+if ($err = system($ln))
+{
+	print "ERROR: Error produced by assembly pipeline (erno: $err)\n";
+	exit($err);
+}
+
+print "INFO: Running search-pipeline at " . get_timestamp() . "\n"; 
+if (! -f $assembly_out_file)
+{
+	print "ERROR: Unable to find the $assembly_out_file file post assembly!\n";
+	exit(105);
+}
+
+$ln = "./search-pipeline $assembly_out_file $proj_name";
+print "$ln\n";
+if ($err = system($ln))
+{
+	print "ERROR: Error produced by search pipeline (erno: $err)\n";
+	exit($err);
+}
+
+print "INFO: Running post search-pipeline at " . get_timestamp() . "\n"; 
+if (! -d $search_out_folder)
+{
+	print "ERROR: Unable to find the $search_out_folder folder post search!\n";
+	exit(105);
+}
+
+$ln = "./post-search-pipeline $search_out_folder";
+print "$ln\n";
+if ($err = system($ln))
+{
+	print "ERROR: Error produced by search pipeline (erno: $err)\n";
+	exit($err);
+}
+
+
+
+sub get_type_from_ext
+{
+	my $file = shift;
+	return "454" if ( $file =~ m/.sff$/ );
+	return "sanger" if ( $file =~ m/.(fasta|.fna)/ );
+	return undef;
+}
+
+sub get_timestamp
+{	
+	my ($sec,$min,$hour,$mday,$mon,$year) = localtime(time);
+	return sprintf("%04d-%02d-%02d %02d:%02d:%02d", 
+		1900+$year, 1+$mon, $mday, $hour, $min, $sec);
+}

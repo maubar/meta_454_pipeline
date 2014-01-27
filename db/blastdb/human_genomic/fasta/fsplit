@@ -1,0 +1,71 @@
+#!/usr/bin/perl -w
+
+use strict;
+
+if (scalar @ARGV < 1)
+{
+	print("Pass a FASTA file as a command line argument.\n");
+	exit;
+}
+
+my $file = $ARGV[0];
+my $out = ($file =~ /(.+?)(\.[^.]+)$/)? "$1.split$2" : "$file.split";
+
+# each line is 80 nucleotides
+my $max_lines = 500;
+my $overlap_lines = 50;
+
+
+open(FILE, "<$file") || die("ERROR: Unable to open $file for input.\n");
+open(OUT, ">$out") || die("ERROR: Unable to open $out for output.\n");
+
+
+my $header;
+my $part;
+my $line_count;
+my @last_lines;
+
+while (my $line = <FILE>)
+{
+	if ($line =~ /^>/)
+	{
+		$header = $line;
+		$part = 2;
+		$line_count = 0;
+		@last_lines = ();
+
+		# write first header
+		my $part_header = $header;
+		$part_header =~ s/$/ (part 1)/;
+		print OUT $part_header;
+	}
+	elsif (defined $header && $line !~ /^$/)
+	{
+		print OUT $line;
+		++$line_count;
+
+
+		push(@last_lines, $line);
+		if ((scalar @last_lines) > $overlap_lines)
+		{
+			shift(@last_lines);
+		}
+
+		if ($line_count > $max_lines)
+		{
+			# write new header
+			my $part_header = $header;
+			$part_header =~ s/$/ (part $part)/;
+
+			++$part;
+			$line_count = $overlap_lines;
+
+			print OUT $part_header;
+			print OUT @last_lines;
+		}
+	}
+
+}
+
+close(FILE);
+close(OUT);

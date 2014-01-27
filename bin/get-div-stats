@@ -1,0 +1,39 @@
+#!/usr/bin/perl -w
+
+use strict;
+use File::Basename;
+
+if (scalar @ARGV == 0)
+{
+	print STDERR "Please supply a single file which to analyse for taxonomy divition stats!\n";
+	exit 2;
+}
+
+my %divnames = ("BCT" => "Bacteria", "INV" => "Invertebrates", "MAM" => "Mammals", "PHG" => "Phages", "PLN" => "Plants", "PRI" => "Primates", "ROD" => "Rodents", "SYN" => "Synthetic", "UNA" => "Unassigned", "VRL" => "Viruses", "VRT" => "Vertebrates", "ENV" => "Environmental samples", "UNK" => "Unknown", "UND" => "Undefined");
+my %scount, my %rcount, my $tsc, my $trc;
+
+foreach my $file (@ARGV)
+{
+	print "#$file\n";
+	my $r = 0;
+	open(FILE, $file);
+	while (<FILE>)
+	{
+		if ( m/^>/ )
+		{
+			$r = m/nreads=(\d+)/ ? $1 : 1;
+		}
+		elsif ($r && m/dt\|([A-Z]{3})\./)
+		{
+			$scount{$1}++; $tsc++;
+			$rcount{$1} += $r; $trc += $r;
+			undef $r;
+		}
+	}
+	close(FILE);
+}
+
+print "\n#sequence counts\n";
+printf "$divnames{$_} %.2f%% ($scount{$_})\t$scount{$_}\n", $scount{$_} * 100 / $tsc foreach (sort keys %scount);
+print "#reads counts\n";
+printf "$divnames{$_} %.2f%% ($rcount{$_})\t$rcount{$_}\n", $rcount{$_} * 100 / $trc foreach (sort keys %rcount);

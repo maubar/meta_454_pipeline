@@ -1,0 +1,1439 @@
+#!/usr/bin/perl -w
+
+use strict;
+use File::Copy;
+use File::Basename;
+
+
+my $file_fasta = shift;
+my $folder_result_subfolder = shift;
+my $recalc_out_files = shift; $recalc_out_files = 1 if (! defined $recalc_out_files);
+
+my $folder_result = "result";
+my $cpu_count = int(`grep -c processor /proc/cpuinfo`);
+
+if (! defined $file_fasta || ! -f $file_fasta)
+{
+	print "Please supply a valid FASTA file as a command line argument!\n";
+	exit;
+}
+my $db_blast = "db/blastdb";
+my $db_taxonomy = "db/taxdb";
+my $binary_blastall = "blastall";
+my $binary_megablast = "megablast";
+
+my $single_file_output_count = 10;
+my $consed_file_output_count_from_single = 3;
+my $consed_file_output_count = 12;
+my $max_line_length = 240;
+my $output_progress = 1;
+
+my $preclassify_id_threshold = 90;
+my $preclassify_cov_threshold = 70;
+
+my $eval_score_xn_ratio = 0.75;	# eval x score or n score, eval x if at least $eval_score_xn_ratio of n
+
+
+my $blaste = 10;			# e-value threshold for result-reporting
+my $blastrc = 10;			# amount of results to report
+my $mblastr = 2;			# megablast reward for match
+my $mblastq = -3;			# megablast penalty for miss-match
+my $mblastG = 5;			# megablast gap opening penalty
+my $mblastE = 2;			# megablast gap extension penalty
+my $blastnr = 4;			# blastn reward for match
+my $blastnq = -5;			# blastn penalty for miss-match
+my $blastnG = 12;			# blastn gap opening penalty
+my $blastnE = 8;			# blastn  gap extension penalty
+
+# m == output format (XML), I == GIs in deflines, F = repeat filtering
+my $blastparams_all = "-e$blaste -a$cpu_count -v$blastrc -b$blastrc -m7 -IT -FF"; 
+my %blastparams = (
+	"megablast" => "$blastparams_all -r$mblastr -q$mblastq -G$mblastG -E$mblastE", 
+	"blastn" => "$blastparams_all -r$blastnr -q$blastnq -G$blastnG -E$blastnE",
+	"blastx" => "$blastparams_all"
+);
+my %blastbinaries = (
+	"megablast" => $binary_megablast, 
+	"blastn" => "$binary_blastall -pblastn",
+	"blastx" => "$binary_blastall -pblastx"
+);
+
+
+$folder_result_subfolder = $file_fasta =~ m/([^\\\/]+?)\.[^.]+$/ ? $1 : $file_fasta if (! defined $folder_result_subfolder);
+
+# create result folder if none-existing
+mkdir($folder_result) if (! -d $folder_result);
+$folder_result .= "/$folder_result_subfolder";
+mkdir($folder_result) if (! -d $folder_result);
+my $folder_result_run = "$folder_result/run";
+mkdir($folder_result_run) if (! -d $folder_result_run);
+
+
+my $file_fasta_seq_count = int(`grep -c '^>' $file_fasta`);
+if (! $file_fasta_seq_count)
+{
+	print "No sequences found in FASTA file!\n";
+	exit;
+}
+
+
+$| = 1; # set autoflush
+my $ln, my $step, my @files;
+my %classified, my %split_sequence;
+my @dbparts = ("MAM", "BCT", "VRL", "OTR");
+my $dbfolder, my $dbname, my $blasttype;
+my $file_shortout, my $file_smapout, my $file_blastoutwarn;
+
+
+
+my $file_new_fasta = "$folder_result_run/s1.fasta";
+copy($file_fasta, $file_new_fasta) || die ("ERROR: Unable to copy FASTA file at $file_fasta to $file_new_fasta!\n");
+$file_fasta = $file_new_fasta;
+
+
+#define steps
+my %steps = (
+	1 => {'type' => 'megablast', 'dbname' => 'nt', 'dbfolder' => "$db_blast/nt.split", "perform-split" => 0}, 
+	2 => {'type' => 'blastn', 'dbname' => 'nt', 'dbfolder' => "$db_blast/nt.split", "perform-split" => 1}, 
+	3 => {'type' => 'blastx', 'dbname' => 'nr', 'dbfolder' => "$db_blast/nr.split", "perform-split" => 0}, 
+);
+
+print "INFO: Starting pipeline on $file_fasta_seq_count sequences, writing results into $folder_result\n";
+
+
+#
+# Running BLAST search against splitted database specified by steps
+#
+
+foreach my $step (sort(keys %steps))
+{
+	$blasttype = $steps{$step}{'type'};
+	$dbname = $steps{$step}{'dbname'};
+	$dbfolder = $steps{$step}{'dbfolder'};
+
+	undef %classified;
+	undef %split_sequence;
+
+	my $target_out_file = "$folder_result_run/s" . ($step + 1) . ".fasta";
+	if (! -f $target_out_file)
+	{
+		my $file_split = "s$step.split";
+		my $file_split_fasta = "$folder_result_run/$file_split.fasta";
+
+		my %remove_from_fasta;
+
+		# no split fasta - re-run the complete step
+		if (! -f $file_split_fasta)
+		{
+			print "\nSTEP $step: " . uc($blasttype) . " against " . uc($dbname) . " at " . get_timestamp() . "\n";
+			run_step($blasttype, $dbname, $dbfolder, "s$step", \%classified, \%split_sequence);
+
+			%remove_from_fasta = %classified;
+			if (defined $steps{$step}{'perform-split'} && $steps{$step}{'perform-split'} && scalar keys %split_sequence)
+			{
+				# copy all sequences to be split into list to remove as the splitted sequence will be added
+				$remove_from_fasta{$_} = $split_sequence{$_} foreach (keys %split_sequence);
+	
+				print " splitting " . (scalar keys %split_sequence) . " into $file_split.fasta";
+				process_split_fasta_files($file_fasta, $file_split_fasta, \%split_sequence);
+				print " resulting in " . int(`grep -c '^>' $file_split_fasta`) . " new sequences\n";
+
+				print "\nSTEP $step.1: " . uc($blasttype) . " against " . uc($dbname) . " with splitted sequences at " . get_timestamp() . "\n";
+				run_step($blasttype, $dbname, $dbfolder, $file_split, \%remove_from_fasta, \%split_sequence);
+			}
+		}
+		# we have split-fasta, re-run the split step only
+		else
+		{
+			print "\nSTEP $step: " . uc($blasttype) . " against " . uc($dbname) . ", restarting from split-step at " . get_timestamp() . "\n";
+
+			# load classified sequeneces
+			my %temp;
+			load_fasta(["$folder_result_run/s$step.$dbname.$blasttype.short.classified"], \%temp);
+			$classified{$_} = 1 foreach (keys %temp);
+			undef %temp;
+
+			# load split sequences
+			load_fasta(["$folder_result_run/s$step.split.fasta"], \%temp);
+			foreach (keys %temp)
+			{
+				$split_sequence{$1} = 1 if ( m/(.+?)\-\d+/ );
+			}
+			print " " . (scalar keys %split_sequence) . " sequence found split into " . (scalar keys %temp) . " new sequences\n";
+			undef %temp;
+
+			# copy all sequences to be split into list to remove as the splitted sequence will be added
+			%remove_from_fasta = %classified;
+			$remove_from_fasta{$_} = $split_sequence{$_} foreach (keys %split_sequence);
+
+			print "\nSTEP $step.1: " . uc($blasttype) . " against " . uc($dbname) . " with splitted sequences at " . get_timestamp() . "\n";
+			run_step($blasttype, $dbname, $dbfolder, $file_split, \%remove_from_fasta, \%split_sequence);
+		}
+
+		# produce target out file for next step, from remaining sequences (sequences - remove)
+		if ($recalc_out_files || ! -f $target_out_file)
+		{
+			print " removing already classified sequences from query-set...";
+			(my $c = 0, my $tc = 0) = process_strip_fasta($target_out_file, \%remove_from_fasta, "$folder_result_run/s$step.fasta", "$folder_result_run/s$step.split.fasta");
+			print " $c/$tc entries remain\n";
+			$file_fasta_seq_count = $c;
+		}
+		else
+		{
+			$file_fasta_seq_count = int(`grep -c '^>' $target_out_file`);
+		}
+	}
+}
+
+
+#
+# Collecting results from BLAST pipeline and sequences and results splitting them into DB groups and UND = undefinable (ambigious group), UNK = unknown (no hits found)
+#
+
+print "\nINFO: Collecting results from all steps of the pipeline run at " . get_timestamp() . "\n";
+
+my $all_fasta_out = "$folder_result/sequences.fasta";
+my %sequences, my %results, my %skip_splitted, my @sequences_keys;
+
+
+print " collecting all sequences and write result into $all_fasta_out\n";
+# loading split sequences
+load_fasta([<$folder_result_run/*split.fasta>], \%sequences);
+$skip_splitted{ m/^(.+)-\d+$/ ? $1 : $_ } = 1 foreach (keys %sequences);
+load_fasta(["$folder_result_run/s1.fasta"], \%sequences, \%skip_splitted);
+@sequences_keys = sort { length($sequences{$b}{'data'}) <=> length($sequences{$a}{'data'}); } (keys %sequences);
+# write sequences
+open(OUT, ">", $all_fasta_out);
+print OUT $sequences{$_}{'header'} . $sequences{$_}{'data'} foreach (@sequences_keys);
+close(OUT);
+
+
+print " collecting all results from performed similary searches...";
+
+# loading all short files
+my %short_line_prefix = ('blastx' => 'x', 'blastn' => 'n', 'megablast' => 'n'), my $k;
+while (<$folder_result_run/*.short>)
+{
+	if ( m/s\d+(\.split)?\.[^.]+\.([^.]+)\.short$/ )
+	{
+		my $data_line_add = $short_line_prefix{$+};
+		die("\nERROR: Undefined blast program type $+\n") if (! defined $data_line_add);
+
+		# open file
+		open(FILE, "$_") || die("\nERROR: Unable to open $_ for input!\n");		
+		while (<FILE>)
+		{
+			if ( m/^>([^\s]+)/)
+			{
+				$k = $1;
+				$results{$k}{'headers'}{$data_line_add} = $_;
+				$results{$k}{'header'} = $_ if (! defined $results{$k}{'header'});
+			}
+			elsif (defined $k)
+			{
+				$results{$k}{'data'} .= "$data_line_add:$_";
+			}
+		}
+		close(FILE);
+	}
+}
+
+print " analyzing, producing output\n";
+
+# write output to all results
+my %divbans = ("ENV" => 1, "SYN" => 1, "UNA" => 1);
+my %div2group = ("VRL" => "VRL", "BCT" => "BCT", "PRI" => "MAM", "ROD" => "MAM", "MAM" => "MAM");
+my %group_divide_settings = (
+	"e-value-threshold" => 0.001,				# e-value threshold
+	"class-weight-threshold" => 1.15,		# threshold to trust classification by class-weight
+	"required-part-of-top-score" => 0.75,  # required % of top score to be counted as a top-scoring hit when excluding div-bans
+	"top-hit-veto-superiority" => 2			# ratio between top-hit and second top-hit if to classify only based on top-hit
+
+);
+my %files = ("all" => {'count' => 0, 'name' => "results.txt"});
+open($files{'all'}{'file'}, ">", "$folder_result/$files{'all'}{'name'}") || die("ERROR: Unable to open $folder_result/$files{'all'}{'name'} for output!\n");
+foreach (@sequences_keys)
+{
+	my $res = $results{$_};
+	if (defined $res)
+	{
+		# split results and create a BLASTx/BLASTn collection
+		my @nd, my @xd;
+		foreach (split(/\n/, $res->{'data'}))
+		{
+			if ( m/^x/ )
+			{
+				push (@xd, $_);
+			}
+			else
+			{
+				push (@nd, $_);
+			}
+		}
+		
+		# sort collections
+		@nd = sort { my $as = ($a =~ m/s=([\d\.]+)/ ? $1 : 0); my $bs = ($b =~ m/s=([\d\.]+)/ ? $1 : 0); $bs <=> $as; } (@nd);
+		@xd = sort { my $as = ($a =~ m/s=([\d\.]+)/ ? $1 : 0); my $bs = ($b =~ m/s=([\d\.]+)/ ? $1 : 0); $bs <=> $as; } (@xd);
+
+		# find max scores for both collections and judge by which the sequence should be evaluated
+		my $max_nds = scalar @nd && $nd[0] =~ m/s=([\d\.]+)/ ? $1 : 0;
+		my $max_xds = scalar @xd && $xd[0] =~ m/s=([\d\.]+)/ ? $1 : 0;
+		my $eval_x = $max_xds >= $eval_score_xn_ratio * $max_nds;
+		my $max_s = $eval_x ? $max_xds : $max_nds;
+		my @d = $eval_x ? @xd : @nd;
+		my $h = $eval_x ? $res->{'headers'}{'x'} : $res->{'headers'}{'n'};
+		my $d = $eval_x ? filter_result_list(\@xd) . "\n" . (scalar @nd ? filter_result_list(\@nd) . "\n" : "") 
+							 : filter_result_list(\@nd) . "\n" . (scalar @xd ? filter_result_list(\@xd) . "\n" : "");
+
+
+
+
+		#
+		# determine group for sequence
+		#
+
+		my $cgroup = "UNK", my $cw = 0; 
+		($cw, $cgroup) = ($1, $2) if ($h =~ m/cw=([.\d]+)\((\w+)\)/);
+
+		# iterate all results and assign "top-scoring-hit" and the "next-top-scoring-hit"
+		my $mgroup, my $mgs, my $mge, my $nmgroup, my $nmgs, my $nmge;
+		foreach (@d)
+		{
+			my $e = $_ =~ m/e=([\d\.\-e]+)/ ? $1 : 1000;
+			my $div = $_ =~ m/dt\|(.{3})/ ? $1 : "UNA";
+
+			if (! defined $divbans{$div})
+			{
+				my $s = $_ =~ m/s=([\d\.]+)/ ? $1 : 0;
+				my $g = defined $div2group{$div} ? $div2group{$div} : ($div eq "UNA" ? "UNA" : "OTR");
+				if (! defined $mgroup)
+				{
+					($mgroup, $mgs, $mge) = ($g, $s, $e);
+				}
+				elsif (! defined $nmgroup && defined $mgroup && $g ne $mgroup)
+				{
+					($nmgroup, $nmgs, $nmge) = ($g, $s, $e);
+					last;
+				}
+			}
+		}
+
+		my $group = $max_s != 0 ? "UND" : "UNK";
+		# if top-scoring-hit found, at least "required-part-of-top-score" of max and bellow e-value threshold
+		if (defined $mgs && $mgs >= $group_divide_settings{'required-part-of-top-score'} * $max_s && $mge <= $group_divide_settings{'e-value-threshold'})
+		{
+			# if top-scoring-hit is same as mostly covering hit to the degree of "class-weight-threshold"
+			if ($cw >= $group_divide_settings{'class-weight-threshold'} && defined $mgroup && $cgroup eq $mgroup)
+			{
+				$group = $cgroup;
+			}
+			# else if top-scoring-hit is "top-hit-veto-superiority" as high as the next top-scoring-hit
+			elsif (! defined $nmgs || $mgs >= $group_divide_settings{'top-hit-veto-superiority'} * $nmgs)
+			{
+				$group = $mgroup;
+			}
+		}
+
+
+
+
+		#
+		# done, write to file
+		#
+		
+
+		# open group file if not already open
+		if (! defined $files{$group})
+		{
+			$files{$group} = {"count" => 0, "name" => "results-$group.txt"};
+			open($files{$group}{'file'}, ">", "$folder_result/$files{$group}{'name'}") || die("ERROR: Unable to open $folder_result/$files{$group}{'name'} for output!\n");
+		}
+
+		# write to all-file
+		print {$files{'all'}{'file'}} "$h$d\n"; ++$files{'all'}{'count'};
+		# write to group-file
+		print {$files{$group}{'file'}} "$h$d\n"; ++$files{$group}{'count'};
+	}
+}
+foreach (keys %files)
+{
+	print "  " . $files{$_}{'count'} . " results written to $files{$_}{'name'}\n";
+	close($files{$_}{'file'});
+}
+
+
+#
+# Creating analyzes for data
+#
+
+print "\nINFO: Analyzing groups " . get_timestamp() . "\n";
+my $folder_result_analyze = "$folder_result/analyze";
+mkdir($folder_result_analyze) if (! -d $folder_result_analyze);
+
+# creating VRL analyze folder and get group-id for VRL
+if ($files{'VRL'}{'count'})
+{
+	my $folder_result_analyze_vrl = "$folder_result_analyze/VRL";
+	mkdir($folder_result_analyze_vrl) if (! -d $folder_result_analyze_vrl);
+
+	print " spitting VRL-group into sub-groups in folder $folder_result_analyze_vrl\n";
+	taxnode_split("$folder_result/$files{'VRL'}{'name'}", $folder_result_analyze_vrl, "$db_taxonomy/extract.viridae.out", "VRL");
+
+	if ($files{'VRL'}{'count'} > 4)
+	{
+		system("./bin/res_ld_sort $folder_result_analyze_vrl/*");
+	}
+}
+
+
+
+# creating VRL analyze folder and get group-id for VRL
+if ($files{'BCT'}{'count'})
+{
+	my $folder_result_analyze_bct = "$folder_result_analyze/BCT";
+	mkdir($folder_result_analyze_bct) if (! -d $folder_result_analyze_bct);
+
+	print " spitting BCT-group into sub-groups in folder $folder_result_analyze_bct\n";
+	taxnode_split("$folder_result/$files{'BCT'}{'name'}", $folder_result_analyze_bct, "$db_taxonomy/extract.bacteria-class.out", "BCT");
+
+	if ($files{'BCT'}{'count'} > 4)
+	{
+		system("./bin/res_ld_sort $folder_result_analyze_bct/*");
+	}
+}
+
+my @subsplits; 
+push(@subsplits, "$folder_result/$files{'UND'}{'name'}") if ($files{'UND'}{'count'});
+#push(@subsplits, "$folder_result/$files{'OTR'}{'name'}") if ($files{'OTR'}{'count'});
+foreach my $file (@subsplits)
+{
+	my $name = basename($file, ".txt");
+	my $rbase = $file =~ m/-([A-Z]{3}).txt/ ? $1 : basename($file, ".txt");
+	my $dbase = dirname($file);
+
+	foreach my $search_for (("VRL", "BCT"))
+	{
+		print "INFO: Further splitting " . ($search_for eq "VRL" ? "virus" : "bacteria") . " part of $name\n";
+		my $out_folder =  "$dbase/analyze/$rbase-$search_for";
+
+		mkdir($out_folder) if (! -d $out_folder);	
+
+		my %subsplit_keys;
+
+		print " fetching results...";
+
+		# extract results which have a VRL top hit
+		open(FILE, $file) || die("ERROR: Unable to open $file for input!");
+		open(OUT, ">", "$out_folder/results.txt") || die("ERROR: Unable to open $out_folder/results.txt for output!\n");
+		my $h, my $w = 0;
+		while (<FILE>)
+		{
+			if ( m/^>/ )
+			{	
+				$h = $_; $w = 0;
+			}
+			elsif (defined $h && ! m/^\s*$/)
+			{
+				# process top-hit
+				if ( m/\|dt\|$search_for\./ )
+				{
+					print OUT "$h";
+					$w = 1;
+					$subsplit_keys{$1} = 1 if ($h =~ m/^>([^\s]+)/);
+				}
+				undef $h;
+			}
+			print OUT if ($w);
+		}
+		close(FILE);
+		close(OUT);
+
+		# make sure we have found any sequences
+		if (scalar keys %subsplit_keys == 0)
+		{
+			print " none found!\n";
+			unlink while (<$out_folder/*>);
+			rmdir($out_folder);
+			next;
+		}
+
+		print " " . (scalar keys %subsplit_keys) . " found, done\n fetching sequences...";
+
+		# fetch sequences
+		open(FILE, "$dbase/sequences.fasta") || die("ERROR: Unable to open $dbase/sequences.fasta for input!\n");	
+		open(OUT, ">", "$out_folder/sequences.fasta") || die("ERROR: Unable to open $out_folder/sequences.fasta for output!\n");
+		$w = 0;
+		while (<FILE>)
+		{
+			$w = defined $subsplit_keys{$1} if ( m/^>([^\s]*)/ );
+			print OUT if ($w);
+		}
+		close(OUT);
+		close(FILE);
+
+		print " done\n spitting into sub-groups in folder \n";
+		taxnode_split("$out_folder/results.txt", "$out_folder/split", ($search_for eq "VRL" ? "$db_taxonomy/extract.viridae.out" : "$db_taxonomy/extract.bacteria-class.out"), $search_for);
+
+		if ((scalar keys %subsplit_keys) > 4)
+		{
+			system("./bin/res_ld_sort $out_folder/split/*");
+		}
+	}
+}
+
+
+
+print "\nDONE: All done, goodbye.\n\n";
+exit(0);
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#
+#
+# FUNCTIONS
+#
+#
+
+sub run_step
+{
+	my $blasttype = shift;
+	my $dbname = shift;
+	my $dbfolder = shift;
+	my $file_base = shift;
+	my $classified_hash_ref = shift;
+	my $split_sequence_hash_ref = shift;
+	
+	foreach my $dbpart (@dbparts)
+	{
+		my $file_shortout = "$folder_result_run/$file_base.$dbname.$dbpart.$blasttype.short";
+		my $file_longout = "$folder_result_run/$file_base.$dbname.$dbpart.$blasttype.long";
+		my $file_smapout = "$folder_result_run/$file_base.$dbname.$dbpart.$blasttype.smap";
+		my $file_blastoutwarn = "$folder_result_run/$file_base.$dbname.$dbpart.$blasttype.warn";
+
+		$ln = $blastbinaries{$blasttype} . " -i$folder_result_run/$file_base.fasta -d$dbfolder/$dbname.$dbpart " . $blastparams{$blasttype};
+		print " $ln\n";
+
+		my $apcount = (-f $file_shortout && -f $file_smapout ) ? int(`grep -c '^>' $file_shortout`) : 0;
+		if ($apcount == 0)
+		{
+			open(SMAPOUT, '>', $file_smapout) || die ("ERROR: Unable to open $file_smapout for output!\n");
+			open(LONGOUT, '>', $file_longout) || die ("ERROR: Unable to open $file_longout for output!\n");
+			open(SHORTOUT, '>', $file_shortout) || die ("ERROR: Unable to open $file_shortout for output!\n");
+			open(BLASTPIPE, "-|", "$ln 2>$file_blastoutwarn") || die("ERROR: Unable to pipe-run blastall!\n");
+			#open(BLASTPIPE, "nt.blastn.rna.MAM");
+			my $pc = 0;
+			while (<BLASTPIPE>)
+			{
+				if ( m/^\s*<Iteration>\s*$/ || m/^\s*<BlastOutput>\s*$/)
+				{
+					process_blast_xmloutput_iteration($single_file_output_count, $blasttype);
+					++$pc;
+					printf "\r  %d processed", $pc if ($output_progress);
+				}
+			}
+			print "\n" if ($output_progress); # close the amount processed line
+			close(BLASTPIPE);
+			close(SHORTOUT);
+			close(LONGOUT);
+			close(SMAPOUT);
+		}
+		else
+		{
+			print "  $apcount already processed, remove output file to re-process!\n";
+		}
+
+		unlink($file_blastoutwarn) if (-f $file_blastoutwarn && int(`cat $file_blastoutwarn | wc -l`) == 0);
+	}
+
+	if ($recalc_out_files || ! -f "$folder_result_run/$file_base.$dbname.$blasttype.short")
+	{
+		print " joining result-sets from groups specific similarity search and analyzing results\n";
+		process_join_split_run_results($file_base, $folder_result_run, $dbname, $blasttype, $classified_hash_ref, $split_sequence_hash_ref, $preclassify_id_threshold, $preclassify_cov_threshold);
+	}
+}
+
+
+
+
+
+
+
+
+
+sub process_strip_fasta
+{
+	my $file_new_fasta = shift;
+	my $remove_hash_ref = shift;
+	my @fasta_in_files = @_;
+	my $tc = 0, my $c = 0;
+
+	open(OUT, ">", $file_new_fasta) || die("ERROR: Unable to open $file_new_fasta for output!\n");
+	foreach my $file_fasta (@fasta_in_files)
+	{
+		if (open(FILE, $file_fasta))
+		{
+			my $w = 0;
+			while (<FILE>)
+			{
+				if ( m/^>([^\s]+)/ )
+				{
+					$w = ! defined $remove_hash_ref->{$1};
+					++$tc;
+					++$c if ($w);
+				}
+				print OUT $_ if ($w);
+			}
+			close(FILE);
+		}
+	}
+	close(OUT);
+
+	return ($c, $tc);
+}
+
+sub process_split_fasta_files
+{
+	my $file_fasta = shift;
+	my $file_split_fasta = shift;
+	my $split_hash_ref = shift;
+
+	open(FILE, $file_fasta) || die("ERROR: Unable to open $file_fasta for input!\n");
+	open(OUT, ">", $file_split_fasta) || die("ERROR: Unable to open $file_split_fasta for output!\n");
+	my $h, my $d;
+	while (<FILE>)
+	{
+		if ( m/^>([^\s]+)/ )
+		{
+			my $hkey = $1;
+			process_split_fasta_files_handle($h, $d, $split_hash_ref) if (defined $h && defined $d);
+			undef $h;
+			undef $d;
+			if (defined $split_hash_ref->{$hkey})
+			{
+				$h = $_;
+			}
+		}
+		elsif (defined $h)
+		{
+			chomp;
+			$d .= $_;
+		}
+	}
+	process_split_fasta_files_handle($h, $d, $split_hash_ref) if (defined $h && defined $d);
+	close(OUT);
+	close(FILE);
+}
+
+sub process_output_fasta_data
+{
+	my $file = shift;
+	my $data = shift;
+	my $width = shift; $width = defined $width ? $width : 60;
+
+	my $p = 0;
+	while ($p < length($data))
+	{
+		print $file substr($data, $p, $width) . "\n";
+		$p += $width;
+	}
+}
+
+sub process_split_fasta_files_handle
+{
+	my $h = shift;
+	my $d = shift;
+	my $split_hash_ref = shift;
+
+	#split and write $h, $d;
+	if ($h =~ m/^>([^\s]+)/)
+	{
+		my $hk = $1;
+		my @splits = @{$split_hash_ref->{$hk}};
+		for (0..$#splits)
+		{
+			my $id = $_ + 1;
+			my $sh = $h; $sh =~ s/$hk/$hk-$id/;
+			my $from = $_ != 0 ? $splits[$_ - 1] : 0;					
+			my $to = $splits[$_] - 1;
+			my $l = 1+$to-$from;
+			$sh =~ s/length=\d+/length=$l/;
+			print OUT $sh;
+			process_output_fasta_data(*OUT, substr($d, $from, $l));
+		}
+		my $id = $#splits + 2;
+		my $sh = $h; $sh =~ s/$hk/$hk-$id/;
+		my $from = $splits[$#splits];
+		my $l = length($d) - $from;
+		$sh =~ s/length=\d+/length=$l/;
+		print OUT $sh;
+		process_output_fasta_data(*OUT, substr($d, $from, $l));
+	}
+}
+
+sub load_fasta
+{
+	my $files = shift;
+	my $hash_ref = shift;
+	my $skips_hash_ref = shift;
+	my $k;
+	foreach (@$files)
+	{
+		open(FILE, "$_") || die("ERROR: Unable to open $_ for input!\n");		
+		while (<FILE>)
+		{
+			if ( m/^>([^\s]+)/)
+			{
+				undef $k;
+				# load entry only if none-existing and not already loaded
+				if (! defined $skips_hash_ref->{$1} && ! defined $hash_ref->{$1})
+				{
+					$k = $1;
+					$hash_ref->{$k}{'header'} = $_;
+				}
+			}
+			elsif (defined $k)
+			{
+				$hash_ref->{$k}{'data'} .= $_;
+			}
+		}
+		close(FILE);
+	}
+}
+
+sub load_gi_for_results
+{
+	my $hash_ref = shift;
+	my $tmp_file_base = shift; $tmp_file_base = "./" if (! defined $tmp_file_base);
+
+	my %gi;
+	foreach (keys %$hash_ref)
+	{
+		my $data = defined $hash_ref->{$_}{'data'} ? $hash_ref->{$_}{'data'} : $hash_ref->{$_}{'hits'};
+		if (defined $data)
+		{
+			foreach (@$data)
+			{
+				$gi{$1} = 1 if ( m/gi\|(\d+)/);
+			}
+		}
+	}
+
+	my $gi_filename = "$tmp_file_base.temporary.gi." . (time % 997) . $$ . ".txt";
+	open(OUT, ">", $gi_filename) || die("ERROR: Unable to open file $gi_filename for output!\n");
+	print OUT join("\n", keys %gi);
+	close(OUT);
+	
+	if (system("$db_taxonomy/gi2tax $gi_filename $db_taxonomy > /dev/null") != 0)
+	{
+		unlink($gi_filename) if (-f $gi_filename);
+		die "ERROR: while executing gi2tax!\n";
+	}
+
+	open(FILE, $gi_filename) || die("ERROR: Unable to open file $gi_filename for input!\n");
+	while (<FILE>)
+	{
+		my ($gi, $tax, $div) = split;
+		$gi{$gi} = {'tax' => $tax, 'div' => $div};
+	}
+	close(FILE);
+		
+	unlink($gi_filename);
+
+	foreach (keys %$hash_ref)
+	{
+		my $data = defined $hash_ref->{$_}{'data'} ? $hash_ref->{$_}{'data'} : $hash_ref->{$_}{'hits'};
+		if (defined $data)
+		{
+			foreach (@$data)
+			{
+				if ( m/gi\|(\d+)/)
+				{
+					my $giinfo = $gi{$1};
+					if (defined $giinfo)
+					{
+						die "ERROR: div/tax information for $1 not found!\n" if (! defined $giinfo->{'div'});
+						
+						my $dt = $giinfo->{'div'} . "." . $giinfo->{'tax'};
+						s/(gi\|$1\|([^|]+\|)*\|*)/$1dt\|$dt\|/;
+					}
+				}
+			}
+		}
+	}
+
+	undef %gi;
+}
+
+sub analyze_smaps_and_set_header_and_splits
+{
+	my $seq = shift;
+	my $seq_key = shift;
+	my $split_hash = shift;
+
+	my %counts, my %smap = %{$seq->{'smap'}};
+
+	my $len = 0;
+	my @smapparts; 
+	foreach (@dbparts)
+	{
+		if (defined $smap{$_})
+		{
+			push(@smapparts, $_);
+			$len = scalar @{$smap{$_}};
+		}
+	}
+	$counts{$_} = 0 foreach (@smapparts);
+
+	$seq->{'len'} = $len; # make sure is set
+
+	my @ranges, my $rstart, my $rpart, my $rmax = 0;
+	for (0..$len)
+	{
+		my $mpart, my $max = 0;
+		foreach my $part (@smapparts)
+		{
+			my $s = $smap{$part}->[$_];
+			if (defined $s && $s ne '-' && $s > $max)
+			{
+				$mpart = $part;
+				$max = $s;
+			}
+		}
+		$rmax = $max if ($max > $rmax);
+		if (defined $mpart)
+		{
+			++$counts{$mpart};
+
+			if (defined $split_hash && (! defined $rpart || $rpart ne $mpart))
+			{
+				# new part, push range if large enough
+				push(@ranges, {'part' => $rpart, 'start' => $rstart, 'stop' => $_ - 1}) if (defined $rpart && defined $rstart && $_ - $rstart >= 50 && $rmax > 50);
+				$rstart = $_;
+				$rpart = $mpart;
+				$rmax = 0;
+			}
+		}
+	}
+
+	if (@ranges >= 2 && defined $seq_key && defined $split_hash)
+	{
+		# evaluate each splitting
+		my @splits;
+		my $split_point_start = 0;
+		for (0..$#ranges-1)
+		{
+			my $split_point = $ranges[$_]->{'stop'} + int(($ranges[$_+1]->{'start'} - $ranges[$_]->{'stop'}) / 2);
+			my $nsplit_point = $_ != $#ranges-1 ? $ranges[$_+1]->{'stop'} + int(($ranges[$_+2]->{'start'} - $ranges[$_+1]->{'stop'}) / 2) : $seq->{'len'} - 1;
+
+			#analyze range-weight before split-point, after split-point
+			my $w1 = get_range_weight($seq, $ranges[$_]->{'part'}, $split_point_start, $split_point);
+			my $w2 = get_range_weight($seq, $ranges[$_+1]->{'part'}, $split_point, $nsplit_point);
+
+			if ($w1 >= 2.0 && $w2 >= 2.0)
+			{
+				push(@splits, $split_point);
+			}
+			$split_point_start = $split_point;
+		}
+		# if any valid split point found, add to split-hash
+		if (scalar @splits)
+		{
+			$split_hash->{$seq_key} = [@splits] ;
+		}
+	}
+
+
+	my $header = $seq->{'header'};
+	chomp $header;
+	$header =~ s/ cw=[^\s]+//;
+	$header =~ s/ $_=\d+// foreach (@dbparts);
+
+	# add smaps position winner counts to header
+	my $max = 0, my $max_group;
+	foreach (@smapparts)
+	{
+		($max, $max_group) = ($counts{$_}, $_) if (defined $counts{$_} && $counts{$_} > $max);
+	}
+	# add weight for most abundent
+	if (defined $max_group)
+	{
+		my $weight = get_range_weight($seq, $max_group);
+		$header .= sprintf(" cw=%.2f(%s)", $weight, $max_group);
+	}
+	# add specific count for groups
+	foreach (@smapparts)
+	{
+			$header .= " $_=" . $counts{$_} if (defined $counts{$_} && $counts{$_} > 0);
+	}
+
+	# restore header endline
+	$header .= "\n";
+
+	 $seq->{'header'} = $header;
+}
+
+sub get_range_weight
+{
+	my $seq_hash = shift;
+	my $designated = shift;
+	my %smap = %{$seq_hash->{'smap'}};
+	my $from = shift; $from = 0 if (! defined $from);
+	my $to = shift; $to = $seq_hash->{'len'} - 1 if (! defined $to);
+
+	my @smapparts; 
+	foreach (@dbparts)
+	{
+		push(@smapparts, $_) if (defined $smap{$_});
+	}
+
+	my $min_score = 20.0;
+	my $max_factor = 10.0;
+
+	my $sum_factor = 0;
+	for ($from..$to)
+	{
+		my $dscore = defined $smap{$designated}->[$_] && $smap{$designated}->[$_] ne '-' ? 
+			$smap{$designated}->[$_] : $min_score;
+
+		my $max = $min_score;
+		my $mpart = "NAN";
+		foreach my $part (@smapparts)
+		{
+			my $s = $smap{$part}->[$_];
+			if (defined $s && $s ne '-' && $part ne $designated && $part ne "OTR")
+			{
+				$max = $s;
+				$mpart = $part;
+			}
+		}
+
+		my $factor = $max != 0 ? $dscore / $max : $max_factor;
+		$sum_factor += $factor < $max_factor ? $factor : $max_factor;
+	}
+	my $mean_factor = $sum_factor / (1 + $to - $from);
+
+	return $mean_factor;
+}
+
+sub process_join_split_run_results
+{
+	my $filebase = shift;
+	my $folder_result_run = shift;
+	my $dbname = shift;
+	my $blasttype = shift;
+	my $classified_hash_ref = shift;
+	my $split_sequence_hash_ref = shift;
+	my $preclassify_id_threshold = shift;
+	my $preclassify_cov_threshold = shift;
+	my %sequences, my $key;
+	my $patternbase = "$folder_result_run/$filebase.$dbname.";
+
+	# read short files
+	foreach (<$patternbase*.$blasttype.short>)
+	{
+		open(FILE, $_) || die("ERROR: Unable to open $_ for input!\n");
+		my $hit_count = 0;
+		while (<FILE>)
+		{
+			if ( m/^>([^\s]+)/ )
+			{
+				$key = $1;
+				$hit_count = 0;
+				$sequences{$key}{'header'} = $_;
+				$sequences{$key}{'len'} = $_ =~ m/length=(\d+)/ ? $1 : 0;
+			}
+			elsif ($hit_count < $consed_file_output_count_from_single)
+			{
+				push(@{ $sequences{$key}{'hits'} } , $_);
+				++$hit_count;
+			}
+		}
+		close(FILE);
+	}
+
+	print " resolving taxonomy information for sequences.";
+	load_gi_for_results(\%sequences, "$folder_result_run/$filebase");
+	print ".. done.\n";
+
+	my $file_short_joined = "$folder_result_run/$filebase.$dbname.$blasttype.short";
+	my $file_short_joined_classified = "$folder_result_run/$filebase.$dbname.$blasttype.short.classified";
+	open(OUT, ">", $file_short_joined) || die("ERROR: Unable to open $file_short_joined for output!\n");
+	open(OUT_CLASSIFIED, ">", $file_short_joined_classified) || die("ERROR: Unable to open $file_short_joined_classified for output!\n");
+
+	# open all score map files
+	my @smap_files;
+	foreach (<$patternbase*.$blasttype.smap>)
+	{
+		my $dbpart = m/$dbname\.(.+)\.$blasttype\.smap/ ? $1 : "UNK";
+		my $name = $_, my $file;
+
+		open($file, $name);
+		
+		my $cline = <$file>; my $ckey = $cline =~ m/^>([^\s]+)/ ? $1 : undef;
+		push(@smap_files, [$file, $dbpart, $ckey]);
+	}
+
+	foreach $key (sort { $sequences{$b}{'len'} <=> $sequences{$a}{'len'} } (keys %sequences))
+	{
+		my $seq = $sequences{$key};
+
+		# create smap for sequence
+		my %smap;
+		foreach my $file (@smap_files)
+		{
+			if ($file->[2] eq $key)
+			{
+				my $fh = $file->[0];
+				my $line = <$fh>; chomp $line;
+				my @smap = split(" ", $line);
+				$smap{$file->[1]} = [ @smap ];
+				$seq->{'len'} = scalar @smap;
+
+				my $cline = <$fh>; 
+				my $ckey = $cline =~ m/^>([^\s]+)/ ? $1 : undef;
+
+				$file->[2] = $cline;
+			}
+		}
+		$seq->{'smap'} = \%smap;
+
+		analyze_smaps_and_set_header_and_splits($seq, $key, $split_sequence_hash_ref);
+
+		my @sorted_hits = sort 
+		{
+			my $as = ($a =~ m/s=([\d.]+)[,#]/ ? $1 : 0); 
+			my $bs = ($b =~ m/s=([\d.]+)[,#]/ ? $1 : 0);
+			$bs <=> $as;
+		} 
+		(@{ $seq->{'hits'} });
+
+		# add to classified if above threshold
+		my $write_classified = 0;
+		if ($#sorted_hits && $sorted_hits[0] =~ m/id=([\d.]+)%.+?,cov=([\d.]+)%/)
+		{
+			$classified_hash_ref->{$key} = $write_classified = 1 if ($1 >= $preclassify_id_threshold && $2 >= $preclassify_cov_threshold);
+		}
+
+		# print header and hits
+		print OUT $seq->{'header'};
+		print OUT_CLASSIFIED $seq->{'header'} if ($write_classified);
+		for (0..$#sorted_hits)
+		{
+			last if ($_ == $consed_file_output_count);
+			print OUT $sorted_hits[$_];
+			print OUT_CLASSIFIED $sorted_hits[$_] if ($write_classified);
+		}
+
+		# clean-up
+		undef $seq; 
+		undef $sequences{$key};
+	}
+
+	close($_->[0]) foreach (@smap_files);
+
+	close(OUT);
+	close(OUT_CLASSIFIED);
+
+	undef %sequences;
+}
+
+
+
+sub process_blast_xmloutput_iteration
+{
+	# read iteration summary
+	my $single_file_output_count = shift, my $blasttype = shift;
+	my $qdef, my $qlen, my $i;
+	while (<BLASTPIPE>)
+	{
+		$qdef = $2 if ( m/<(Iteration_query-def|BlastOutput_query-def)>(.+?)<\/\1>/);
+		$qlen = $2 if ( m/<(Iteration_query-len|BlastOutput_query-len)>(.+?)<\/\1>/);
+		last if ( m/<Iteration_hits>/);
+		return if ( m/<\/Iteration>/);
+	}
+
+	$qdef =~ s/\s+/ /;
+
+	my $current_hit_num;
+	my @hsps;
+	my %hits;
+
+	my $blast_query_length_factor = $blasttype =~ m/blastx/ ? 3 : 1;
+
+	# read hits
+	while (<BLASTPIPE>)
+	{
+		if ( m/<Hit>/)
+		{
+			my %hit_nfo;
+			while (<BLASTPIPE>)
+			{
+				last if ( m/<Hit_hsps>/);
+				$hit_nfo{$1} = $2 if ( m/<Hit_([^>]+)>(.+?)<\/Hit_\1>/);
+			}
+			$current_hit_num = $hit_nfo{"num"};
+			$hits{$current_hit_num} = \%hit_nfo if (defined $current_hit_num);
+		}
+		elsif (defined $current_hit_num && m/<Hsp>/)
+		{
+			my %hsp = ("hit-id" => $current_hit_num);
+			while (<BLASTPIPE>)
+			{
+				last if ( m/<\/Hsp>/);
+				$hsp{$1} = $2 if ( m/<Hsp_([^>]+)>(.+?)<\/Hsp_\1>/);
+			}
+			# order query from..to to always be a forward range
+			my $qf = $hsp{'query-from'}; 
+			my $qt = $hsp{'query-to'};
+			$hsp{'query-from'} = $qf < $qt ? $qf : $qt;
+			$hsp{'query-to'} = $qf < $qt ? $qt : $qf;
+			$hsp{'qalign-len'} = 1 + $hsp{'query-to'} - $hsp{'query-from'};
+			$hsp{'salign-len'} = 1 + $hsp{'hit-to'} - $hsp{'hit-from'};
+
+			# calculate %id, %cov
+			$hsp{'pid'} = $hsp{'identity'} * 100 * $blast_query_length_factor / $hsp{'qalign-len'};
+			$hsp{'pcov'} = $hsp{'qalign-len'} *100 / $qlen;
+
+			# round bit-score
+			$hsp{'bit-score'} = sprintf("%.2f", $hsp{'bit-score'});
+			
+			push(@hsps, \%hsp);
+		}
+		elsif ( m/^\s*<\/Iteration>\s*$/)
+		{
+			last;
+		}
+
+	}
+	#print $hits{$_->{"hit-id"}}{"def"} . "\t" . $_->{"evalue"} . "\n" foreach (@hsps); die;
+		
+
+	# join blastx hits
+	if ($blasttype eq 'blastx')
+	{
+		my @joined_hsps;
+		my $i = 0;
+		while ($i <= $#hsps)
+		{
+			my %hi = %{$hsps[$i]};
+			push(@joined_hsps, $hsps[$i]);
+
+			# check if possible to join with entries bellow
+			my $stop;			
+			for ($i+1..$#hsps)
+			{
+				my %test = %{$hsps[$_]};
+				if ($hi{'hit-id'} == $test{'hit-id'} && $hi{'evalue'} == $test{'evalue'} && $hi{'bit-score'} != $test{'bit-score'})
+				{
+					$stop = $_;
+				}
+				else
+				{
+					last;
+				}
+			}
+
+			if (defined $stop)
+			{
+				$hsps[$i]->{'multiple-hits'} = [ $hsps[$i] ];
+
+				# derive positions of identity
+				my %qid, my %qal;
+				get_pos_id_cov($hsps[$i], \%qid, \%qal);
+
+				for ($i+1..$stop)
+				{
+					$hsps[$i]->{'query-from'} = $hsps[$_]->{'query-from'} if ($hsps[$_]->{'query-from'} < $hsps[$i]->{'query-from'});
+					$hsps[$i]->{'query-to'} = $hsps[$_]->{'query-to'} if ($hsps[$_]->{'query-to'} > $hsps[$i]->{'query-to'});
+					$hsps[$i]->{'scores'} .= ";" . $hsps[$_]->{'score'};
+					$hsps[$i]->{'bit-scores'} .= ";" . $hsps[$_]->{'bit-score'};
+
+					get_pos_id_cov($hsps[$_], \%qid, \%qal);
+
+					push(@{$hsps[$i]->{'multiple-hits'}}, $hsps[$_]);
+				}
+
+				$hsps[$i]->{'identity'} = scalar keys %qid;
+				$hsps[$i]->{'qalign-len'} = (scalar keys %qal) * $blast_query_length_factor;
+
+				$hsps[$i]->{'pid'} = $hsps[$i]->{'identity'} * $blast_query_length_factor * 100 / $hsps[$i]->{'qalign-len'};
+				$hsps[$i]->{'pcov'} = $hsps[$i]->{'qalign-len'} * 100 / $qlen; 
+				$hsps[$i]->{'parts'} = 1+$stop-$i;
+
+				# normalize coverage
+				$hsps[$i]->{'pcov'} = 100 if ($hsps[$i]->{'pcov'} > 100);
+
+				$i = $stop;
+			}
+			++$i;
+		}
+		@hsps = @joined_hsps if ($#joined_hsps != $#hsps);
+	}
+
+
+
+	my @sorted_hsps = sort { $b->{'bit-score'} <=> $a->{'bit-score'} } (@hsps);
+
+	# produce and write short/long-result
+	print SHORTOUT ">$qdef\n";
+	print LONGOUT ">$qdef\n";
+	my $c = 0;
+	foreach (@sorted_hsps)
+	{
+		last if (++$c > $single_file_output_count);
+
+		#
+		# print to short out
+		#
+
+		my %hit = %{$hits{$_->{'hit-id'}}};
+		my $line = sprintf "#e=%g,s=%s,id=%.1f%%(%d/%d),cov=%.1f%%(%d/%d),qhit=%d..%d,dhit=%d..%d%s#>%s %s", 
+			$_->{'evalue'}, $_->{'bit-score'}, 
+			$_->{'pid'}, $_->{'identity'}, $_->{'qalign-len'} / $blast_query_length_factor, 
+			$_->{'pcov'}, $_->{'qalign-len'}, $qlen,
+			$_->{'query-from'}, $_->{'query-to'},  $_->{'hit-from'}, $_->{'hit-to'}, 
+			(defined $_->{'parts'} ? ",parts=" . $_->{'parts'} : ""), $hit{'id'}, $hit{'def'};
+		# cut line if too long
+		print SHORTOUT ($max_line_length > 2 && length($line) > $max_line_length - 2) ? substr($line, 0, $max_line_length - 2) . "..\n" : "$line\n";
+
+		#
+		# print to long out
+		#
+		printf LONGOUT "#e=%g,s=%s,id=%.1f%%(%d/%d),cov=%.1f%%(%d/%d)%s#>%s %s\n", 
+			$_->{'evalue'}, defined $_->{'bit-scores'} ? $_->{'bit-scores'} : $_->{'bit-score'},
+			$_->{'pid'}, $_->{'identity'}, $_->{'qalign-len'} / $blast_query_length_factor, 
+			$_->{'pcov'}, $_->{'qalign-len'}, $qlen,
+			(defined $_->{'parts'} ? ",parts=" . $_->{'parts'} : ""), 
+			$hit{'id'}, $hit{'def'};
+		if (defined $_->{'multiple-hits'})
+		{
+			foreach my $mhits (@{$_->{'multiple-hits'}})
+			{
+				printf LONGOUT "##% 7d %s %d\n", $_->{'query-from'}, $_->{'qseq'}, $_->{'query-to'};
+				printf LONGOUT "##        %s\n", $_->{'midline'};
+				printf LONGOUT "##% 7d %s %d\n", $_->{'hit-from'}, $_->{'hseq'}, $_->{'hit-to'};
+			}
+		}
+		else
+		{
+			printf LONGOUT "##% 7d %s %d\n", $_->{'query-from'}, $_->{'qseq'}, $_->{'query-to'};
+			printf LONGOUT "##        %s\n", $_->{'midline'};
+			printf LONGOUT "##% 7d %s %d\n", $_->{'hit-from'}, $_->{'hseq'}, $_->{'hit-to'};
+		}
+	}
+	print LONGOUT "\n";
+
+
+	#
+	# produce and write evalue map
+	#
+	my @smap; $#smap = $qlen;
+	foreach (@sorted_hsps)
+	{
+		my $s = $_->{'bit-score'};
+		for ($_->{'query-from'}..$_->{'query-to'})
+		{
+			$smap[$_] = ! defined $smap[$_] || $s > $smap[$_] ? $s : $smap[$_];
+		}
+	}
+
+	print SMAPOUT ">$qdef\n";
+	print SMAPOUT defined $_ ? "$_ " : "- " foreach (@smap);
+	print SMAPOUT "\n";
+}
+
+sub get_pos_id_cov
+{
+	my $hsp = shift, my $id_hash = shift, my $cov_hash = shift;
+
+	my @ml = split(//, $hsp->{'midline'});
+	my @qs = split(//, $hsp->{'qseq'});
+	my $qo = $hsp->{'query-from'};
+
+	for (0..$#ml) 
+	{
+		if ($qs[$_] ne '-')
+		{
+			$cov_hash->{$qo+$_} = 1;
+			$id_hash->{$qo+$_} = 1 if ($ml[$_] =~ m/[A-Z\|]/); # identity annotated by the acid character or | if nucleotides
+		}
+	}
+}
+
+
+sub get_timestamp
+{	
+	my ($sec,$min,$hour,$mday,$mon,$year) = localtime(time);
+	return sprintf("%04d-%02d-%02d %02d:%02d:%02d", 
+		1900+$year, 1+$mon, $mday, $hour, $min, $sec);
+}
+
+sub taxnode_split
+{
+	my $file_fasta = shift;
+	my $folder_out = shift;
+	my $file_nodes = shift;
+	my $type = shift; $type = "[A-Z]{3}" if ( ! defined $type);
+	my $output_count = shift; $output_count = -1 if ( ! defined $output_count);
+
+	my %sub_nodes;
+	my %tax_id_lookup;
+
+	#reading nodes to extract
+	open(FILE, $file_nodes) || die("ERROR: Unable to open $file_nodes for input.\n");
+	my $base;
+	while (<FILE>)
+	{
+		if ( m/^(\d+)\t(.+)/ )
+		{
+			$base = $1;
+			$sub_nodes{$base} = $2;
+		}
+		elsif (defined $base && m/^>(\d+)/)
+		{
+			$tax_id_lookup{$1} = $base;
+		}
+	}
+	close(FILE);
+
+
+	# reading file to split
+	my @entries;
+	my $entry;
+	open(FILE, "<$file_fasta") || die("ERROR: Unable to open $file_fasta for input.\n");
+	while (<FILE>)
+	{
+		if ( m/^>/)
+		{
+			push(@entries, $entry) if (defined $entry);
+			$entry = $_;
+		}
+		else
+		{
+			$entry .= $_;
+		}
+	}
+	push(@entries, $entry) if (defined $entry);
+	close(FILE);
+
+	@entries = sort 
+	{
+		(my $aid = 0, my $acov = 0) = ($1, $2) if ($a =~ m/id=([\d.]+)%.+?,cov=([\d.]+)%/);
+		(my $bid = 0, my $bcov = 0) = ($1, $2) if ($b =~ m/id=([\d.]+)%.+?,cov=([\d.]+)%/);
+		#($bid*$bcov) <=> ($aid*$acov);
+		if ($aid != $bid)
+		{
+			$bid <=> $aid;
+		}
+		else
+		{
+			$bcov <=> $acov;
+		}
+
+	} (@entries);
+
+	mkdir($folder_out) if (! -d $folder_out);
+
+	my %open_files, my %invalid_base_tax_id;
+
+	$invalid_base_tax_id{$_} = 1 foreach (qw/0 79205 552364 644608 102294 51368 38173 12429 38061 12333 375548 675074 35342 39780/); # 0 is not found and the others are viridae unclassified classification which is avoided
+
+	foreach (@entries)
+	{
+		my $base_tax_id = 0;
+		while ( m/dt\|$type\.(\d+)/g)
+		{
+			$base_tax_id = (defined $tax_id_lookup{$1}) ? $tax_id_lookup{$1} : $base_tax_id;
+			last if (! defined $invalid_base_tax_id{$base_tax_id});
+		}
+		
+		# open file if not already opened
+		if ( ! defined $open_files{$base_tax_id})
+		{
+			my $name = "unknown";
+			if ($base_tax_id != 0)
+			{
+				$name = lc($sub_nodes{$base_tax_id});
+				$name =~ s/[\/\\]+/-/g;
+				$name =~ s/[\s\t,.]+/./g;
+			}
+
+			my $file_name = "$folder_out/$name.txt";
+			open($open_files{$base_tax_id}, ">$file_name") || die("ERROR: Unable to open $file_name for output.\n");
+		}
+
+		if ($output_count >= 0)
+		{
+			my @lines = split(/\n+/, $_);
+			my $high = ($#lines > $output_count ? $output_count : $#lines);
+			print { $open_files{$base_tax_id} } "$lines[$_]\n" for (0..$high);
+			print { $open_files{$base_tax_id} } "\n\n";
+		}
+		else
+		{
+			print { $open_files{$base_tax_id} } $_;
+		}
+	}
+	close($_) foreach (values %open_files);
+
+}
+
+sub filter_result_list
+{
+	my $d = shift;
+	# score for n=2    3    4    5     6
+	my @thres = (0.4, 0.6, 0.8, 0.95, 0.99);
+	my $top, my $r;
+	
+	return $r if (! scalar $d);
+
+	my $i = -1, my $t = $thres[0];
+	foreach (@$d)
+	{
+		if ( m/s=([\d\.]+)/ )
+		{
+			$top = $1 if (! defined $top);
+			$r .= "$_\n" if ($1 >= $top * $t);
+			++$i; $t = $thres[$i] if (defined $thres[$i])
+		}
+	}
+	return $r;
+}
+
+

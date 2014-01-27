@@ -1,0 +1,755 @@
+#!/usr/bin/perl -w
+
+use strict;
+
+use File::Basename;
+
+my $short_result = shift;
+my $fasta_file = shift;
+my $resource_folder = shift;
+my $result_folder = shift; 
+my $cpu_count = int(`grep -c processor /proc/cpuinfo`);
+my $min_seq_len = 50;
+
+my $blastnr = 4;			# blastn reward for match
+my $blastnq = -5;			# blastn penalty for miss-match
+my $blastnG = 12;			# blastn gap opening penalty
+my $blastnE = 8;			# blastn  gap extension penalty
+
+
+if (! defined $result_folder && defined $short_result && defined $fasta_file)
+{
+	my $result_folder = dirname($short_result);
+	print "INFO: No result folder supplied, using $result_folder/[group-name]\n";
+}
+
+if (! defined $short_result || ! -f $short_result
+ || ! defined $fasta_file || ! -f $fasta_file
+ || ! defined $resource_folder || ! -d $resource_folder)
+{
+	print "Please supply a short result file, a fasta file, a result and a resource folder as command line arguments!\n";
+	exit;
+}
+
+$| = 1;
+
+my %settings; read_settings_file(\%settings);
+my %taxid; my %sequences;
+
+$result_folder = dirname($short_result) . "/" . $settings{'group-name'} if (! defined $result_folder);
+$result_folder =~ s/[\/\\]+$//;
+$resource_folder =~ s/[\/\\]+$//;
+
+#
+# reading taxonomy identifiers of interest
+#
+
+if (defined $settings{'tax-nodes-map'})
+{
+	open(FILE, $settings{'tax-nodes-map'}) || die("ERROR: Unable to open $settings{'tax-nodes-map'} for input!\n");
+	my $r = 0, my $key = $settings{'tax-nodes-header-pattern'};
+	print "INFO: Reading taxonomy idenfiers from $settings{'tax-nodes-map'}" . (defined $key ? ", matching $key " : "") . "\n";
+	while (<FILE>)
+	{
+		if ( m/^\d+\s+(.+)/)
+		{
+			$r = (! defined $key || $1 =~ m/$key/i);
+		}
+		elsif ($r && m/^>(\d+)/)
+		{
+			$taxid{$1} = 1;
+		}
+	}
+	close(FILE);
+}
+
+#
+# reading short-results to find sequences of interest
+#
+open(FILE, $short_result) || die("ERROR: Unable to open $short_result for input!\n");
+print "INFO: Reading short result file finding sequences of interest";
+my $count = 0, my $key;
+while (<FILE>)
+{
+	if ( m/^>([^\s]+)/)
+	{
+		$key = $1;
+		++$count;
+	}
+	elsif (defined $key && m/dt\|.{3}\.(\d+)/)
+	{
+		$sequences{$key}{'id'} = $count if (! keys %taxid || defined $taxid{$1});
+		undef $key;
+	}
+}
+close(FILE);
+print ", finding " . (scalar keys %sequences) . "/$count entries\n";
+
+# clear taxid hash as no longer needed
+undef %taxid;
+
+#
+# reading FASTA file
+#
+open(FILE, $fasta_file) || die("ERROR: Unable to open $fasta_file for input!\n");
+print "INFO: Reading FASTA file loading the nucleotide sequence for found sequences\n";
+while (<FILE>)
+{
+	if ( m/^>([^\s]+)/)
+	{
+		undef $key;
+		if (defined $sequences{$1})
+		{
+			$key = $1;
+			$sequences{$key}{'header'} = $_;
+			$sequences{$key}{'key'} = $key;
+			$sequences{$key}{'len'} = 0;
+		}
+	}
+	elsif (defined $key)
+	{
+		chomp;
+		$sequences{$key}{'data'} .= "$_\n";
+		$sequences{$key}{'len'} += length;
+	}
+}
+close(FILE);
+
+foreach (keys %sequences)
+{
+	if (! defined $sequences{$_}{'header'})
+	{
+		print "WARN: No sequence found for $_\n";
+		delete $sequences{$_};
+	}
+}
+
+# create result folder
+if (! -d $result_folder)
+{
+	print "INFO: Creating folder $result_folder\n";
+	mkdir($result_folder);	
+}
+
+# output sequences to result folder
+my $sequences_file = "$result_folder/sequences.fasta";
+open(OUT, ">", $sequences_file) || die("ERROR: Unable to open $sequences_file for output!\n");
+foreach (sort {$a->{'id'} <=> $b->{'id'}} (values %sequences))
+{
+	print OUT $_->{'header'} . $_->{'data'};
+}
+close(OUT);
+
+print "INFO: Running BLASTx against gene-tagged database\n";
+
+my $blast_out_folder = "$result_folder/blast";
+mkdir($blast_out_folder) if (! -d $blast_out_folder);
+
+
+# run BLAST-x against gene-tagged protein database
+my $blast_result_file = "$blast_out_folder/gene.mapping.blastx";
+my $blastxln = "blastall -pblastx -e10 -b5 -v5 -m7 -IT -FF -a$cpu_count";
+print " $blastxln\n";
+if (! -f $blast_result_file)
+{
+	system("$blastxln -d$resource_folder/$settings{'gene-db'} -i$sequences_file -o$blast_result_file");
+}
+else
+{
+	print " already processed, remove $blast_result_file to re-process\n";
+}
+
+print " processing results.\n";
+
+my %gene_nfo;
+my $blast_result_parsed = "$result_folder/gene.map.result";
+genemap_blastxrp($blast_result_file, $blast_result_parsed, "$resource_folder/$settings{'gene-db'}", \%gene_nfo);
+
+# write gene-split fasta
+my %open_files;
+foreach (sort {$a->{'id'} <=> $b->{'id'}} (values %sequences))
+{
+	my $key = $_->{'key'};
+	if (defined $gene_nfo{$key})
+	{
+		my $header = $_->{'header'};
+		my $data = $_->{'data'}; 
+
+		$data =~ s/[\n\r]//g;
+
+		# iterate gene info
+		my @gnfo = @{$gene_nfo{$key}};
+		for (0..$#gnfo)
+		{
+			my ($gene, $from, $to) = @{$gnfo[$_]};
+			my $len = $to - $from + 1;
+			if ($len >= $min_seq_len && length($gene))
+			{
+				$gene =~ s/\s+/./;
+
+				if (! defined $open_files{$gene})
+				{
+					my $file_name = "sequences.$gene.fasta", my $file, my $path = $result_folder;
+					open($file, ">", "$path/$file_name") || die("ERROR: Unable to open $result_folder/$file for output!\n");
+					$open_files{$gene} = { 'name' => $file_name, 'file' => $file, 'count' => 0, 'path' => $path };
+				}
+
+				my $hadd = "-" . ($_+1) . " gene=$gene(" . ($from + 1) . ".." . ($to + 1) . ")";
+				my $oheader = $header; $oheader =~ s/^(>[^\s]+)/$1$hadd/;
+				print {$open_files{$gene}{'file'}} $oheader;
+				process_output_fasta_data($open_files{$gene}{'file'}, substr($data, $from, $len));
+				++$open_files{$gene}{'count'};
+			}
+		}		
+	}
+}
+# close all open files
+close($_->{'file'}) foreach (values %open_files);
+print "  " . $_->{'count'} . " entries written to " . $_->{'name'} . "\n" foreach (values %open_files);
+
+
+print "INFO: Running BLASTn against nucleotide database\n";
+my $blastnln = "blastall -pblastn -e10 -b5 -v5 -m7 -IT -FF -a$cpu_count -r$blastnr -q$blastnq -G$blastnG -E$blastnE";
+my $blastndb = "$resource_folder/$settings{'nucl-db'}";
+my $blastpdb = "$resource_folder/$settings{'prot-db'}";
+foreach my $gene (keys %open_files)
+{
+	my $blastn_result_file = "$blast_out_folder/$gene.blastn";
+	my $blastx_result_file = "$blast_out_folder/$gene.blastx";
+	my $fasta_file = $open_files{$gene}{'path'} . "/" . $open_files{$gene}{'name'};
+	if (! -f $blastn_result_file)
+	{
+		print " $blastnln -i$fasta_file\n";
+		system("$blastnln -i$fasta_file -d$blastndb -o$blastn_result_file");
+	}
+	else
+	{
+		print " already processed, remove $blastn_result_file to re-process\n";
+	}
+
+	if (! -f $blastx_result_file)
+	{
+		print " $blastxln -i$fasta_file\n";
+		system("$blastxln -i$fasta_file -d$blastpdb -o$blastx_result_file");
+	}
+	else
+	{
+		print " already processed, remove $blastx_result_file to re-process\n";
+	}
+
+	# parse results
+	parse_gene_results("$result_folder/result-nucl.$gene.txt", [$blastn_result_file], 5);
+	parse_gene_results("$result_folder/result-prot.$gene.txt", [$blastx_result_file], 5);
+	parse_gene_results("$result_folder/result.$gene.txt", [$blastn_result_file, $blastx_result_file], 10);
+}
+
+
+
+sub parse_gene_results
+{
+	my $result_file = shift;
+	my $blast_files = shift;
+	my $max_output_lines = shift; $max_output_lines = 5 if (! defined $max_output_lines);
+
+	my @ordered_result;
+	my %results, my $c = 0;
+	foreach (@$blast_files)
+	{
+		my $blasttype = m/([^.]+)$/ ? $1 : "blastn";
+
+		open(FILE, $_) || die("ERROR: Unable to open $_ for input!\n");
+		while (<FILE>)
+		{
+			process_blast_xmloutput_iteration(*FILE, \%results, $blasttype) if ( m/^\s*<Iteration>\s*$/ || m/^\s*<BlastOutput>\s*$/);
+		}
+		close(FILE);
+	}
+
+	# sort all hits within each query
+	foreach (keys %results)
+	{
+		$results{$_}{'hits'} = [ 
+			sort 
+			{ 
+				my $as = ($a =~ m/s=([\d.]+)/) ? $1 : 0; 			
+				my $bs = ($b=~ m/s=([\d.]+)/) ? $1 : 0;
+				$bs <=> $as;
+			}
+			(@{ $results{$_}{'hits'} })
+		]; 
+	}
+
+	@ordered_result = sort {
+			(my $aid = 0, my $acov = 0) = ($1, $2) if ($a->{'hits'}->[0] =~ m/id=([\d.]+)%.+?,cov=([\d.]+)%/);
+			(my $bid = 0, my $bcov = 0) = ($1, $2) if ($b->{'hits'}->[0] =~ m/id=([\d.]+)%.+?,cov=([\d.]+)%/);
+			($aid != $bid) ? ($bid) <=> ($aid) : ($bcov) <=> ($acov); 
+		}
+	(values %results);
+	
+	open(OUT, ">", $result_file) || die("ERROR: Unable to open $result_file for input!\n");
+	foreach (@ordered_result)
+	{
+		my @hits = sort { ($b =~ m/[,#]s=([\d.]+)/ ? $1 : 0) <=> ($a =~ m/[,#]s=([\d.]+)/ ? $1 : 0) } (@{$_->{'hits'}});
+		my $high_hits = $#hits; $high_hits = $max_output_lines -1 if ($high_hits >= $max_output_lines);
+		print OUT ">$_->{'qdef'}\n";
+		print OUT "$hits[$_]\n" for (0..$high_hits);
+	}
+	close(OUT);
+}
+
+
+sub process_blast_xmloutput_iteration
+{
+	my $blastpipe = shift;
+	my $results_hash = shift;
+	my $blasttype = shift;
+
+	# read iteration summary
+	my $qdef, my $qkey, my $qlen;
+	while (<$blastpipe>)
+	{
+		$qdef = $2 if ( m/<(Iteration_query-def|BlastOutput_query-def)>(.+?)<\/\1>/);
+		$qlen = $2 if ( m/<(Iteration_query-len|BlastOutput_query-len)>(.+?)<\/\1>/);
+		last if ( m/<Iteration_hits>/);
+		return if ( m/<\/Iteration>/);
+	}
+	$qdef =~ s/\s+/ /;
+	$qkey = $qdef =~ m/^([^\s]+)/ ? $1 : $qdef;
+
+	my $result = defined $results_hash->{$qkey} ? $results_hash->{$qkey} : {"qdef" => $qdef, "qlen" => $qlen, "qkey" => $qkey};
+	$results_hash->{$qkey} = $result;	
+
+	my $current_hit_num;
+	my @hsps;
+	my %hits;
+
+	my $blast_short_type = $blasttype =~ m/blastx/ ? "x" : "n";
+	my $blast_query_length_factor = $blasttype =~ m/blastx/ ? 3 : 1;
+
+	# read hits
+	while (<$blastpipe>)
+	{
+		if ( m/<Hit>/)
+		{
+			my %hit_nfo;
+			while (<$blastpipe>)
+			{
+				last if ( m/<Hit_hsps>/);
+				$hit_nfo{$1} = $2 if ( m/<Hit_([^>]+)>(.+?)<\/Hit_\1>/);
+			}
+			$current_hit_num = $hit_nfo{"num"};
+			$hits{$current_hit_num} = \%hit_nfo if (defined $current_hit_num);
+		}
+		elsif (defined $current_hit_num && m/<Hsp>/)
+		{
+			my %hsp = ("hit-id" => $current_hit_num);
+			while (<$blastpipe>)
+			{
+				last if ( m/<\/Hsp>/);
+				$hsp{$1} = $2 if ( m/<Hsp_([^>]+)>(.+?)<\/Hsp_\1>/);
+			}
+			# order query from..to to always be a forward range
+			my $qf = $hsp{'query-from'}; 
+			my $qt = $hsp{'query-to'};
+			$hsp{'query-from'} = $qf < $qt ? $qf : $qt;
+			$hsp{'query-to'} = $qf < $qt ? $qt : $qf;
+			$hsp{'qalign-len'} = 1 + $hsp{'query-to'} - $hsp{'query-from'};
+			$hsp{'salign-len'} = 1 + $hsp{'hit-to'} - $hsp{'hit-from'};
+
+			# calculate %id, %cov
+			$hsp{'pid'} = $hsp{'identity'} * 100 * $blast_query_length_factor / $hsp{'qalign-len'};
+			$hsp{'pcov'} = $hsp{'qalign-len'} *100 / $qlen;
+			
+			push(@hsps, \%hsp);
+		}
+		elsif ( m/^\s*<\/Iteration>\s*$/)
+		{
+			last;
+		}
+
+	}
+	#print $hits{$_->{"hit-id"}}{"def"} . "\t" . $_->{"evalue"} . "\n" foreach (@hsps); die;
+		
+
+	# join blastx hits
+	if ($blasttype eq 'blastx')
+	{
+		my @joined_hsps;
+		my $i = 0;
+		while ($i <= $#hsps)
+		{
+			my %hi = %{$hsps[$i]};
+			push(@joined_hsps, $hsps[$i]);
+
+			# check if possible to join with entries bellow
+			my $stop;			
+			for ($i+1..$#hsps)
+			{
+				my %test = %{$hsps[$_]};
+				if ($hi{'hit-id'} == $test{'hit-id'} && $hi{'evalue'} == $test{'evalue'} && $hi{'bit-score'} != $test{'bit-score'})
+				{
+					$stop = $_;
+				}
+				else
+				{
+					last;
+				}
+			}
+
+			if (defined $stop)
+			{
+				$hsps[$i]->{'multiple-hits'} = [ $hsps[$i] ];
+
+				# derive positions of identity
+				my %qid, my %qal;
+				get_pos_id_cov($hsps[$i], \%qid, \%qal);
+
+				for ($i+1..$stop)
+				{
+					$hsps[$i]->{'query-from'} = $hsps[$_]->{'query-from'} if ($hsps[$_]->{'query-from'} < $hsps[$i]->{'query-from'});
+					$hsps[$i]->{'query-to'} = $hsps[$_]->{'query-to'} if ($hsps[$_]->{'query-to'} > $hsps[$i]->{'query-to'});
+					$hsps[$i]->{'scores'} .= ";" . $hsps[$_]->{'score'};
+					$hsps[$i]->{'bit-scores'} .= ";" . $hsps[$_]->{'bit-score'};
+
+					get_pos_id_cov($hsps[$_], \%qid, \%qal);
+
+					push(@{$hsps[$i]->{'multiple-hits'}}, $hsps[$_]);
+				}
+
+				$hsps[$i]->{'identity'} = scalar keys %qid;
+				$hsps[$i]->{'qalign-len'} = (scalar keys %qal) * $blast_query_length_factor;
+
+				$hsps[$i]->{'pid'} = $hsps[$i]->{'identity'} * $blast_query_length_factor * 100 / $hsps[$i]->{'qalign-len'};
+				$hsps[$i]->{'pcov'} = $hsps[$i]->{'qalign-len'} * 100 / $qlen; 
+				$hsps[$i]->{'parts'} = 1+$stop-$i;
+
+				# normalize coverage
+				$hsps[$i]->{'pcov'} = 100 if ($hsps[$i]->{'pcov'} > 100);
+
+				$i = $stop;
+			}
+			else
+			{
+				# search for stops
+				my $stops = 0;
+				foreach (split(//, $hsps[$i]->{'qseq'}))
+				{
+					++$stops if ($_ eq '*');
+				}
+				$hsps[$i]->{'stops'} = $stops if ($stops);
+			}
+
+
+			++$i;
+		}
+		@hsps = @joined_hsps if ($#joined_hsps != $#hsps);
+	}
+
+
+	foreach (sort { $b->{'bit-score'} <=> $a->{'bit-score'} } (@hsps))
+	{
+		my %hit = %{$hits{$_->{'hit-id'}}};
+		my $line = sprintf "$blast_short_type#e=%g,s=%.2f,id=%.1f%%(%d/%d),cov=%.1f%%(%d/%d),qhit=%d..%d,dhit=%d..%d%s%s#>%s %s", 
+			$_->{'evalue'}, $_->{'bit-score'}, $_->{'pid'}, $_->{'identity'}, $_->{'qalign-len'} / $blast_query_length_factor, 
+			$_->{'pcov'}, $_->{'qalign-len'}, $qlen,
+			$_->{'query-from'}, $_->{'query-to'},  $_->{'hit-from'}, $_->{'hit-to'}, 
+			(defined $_->{'parts'} ? ",parts=" . $_->{'parts'} : ""), 
+			(defined $_->{'stops'} ? ",stops=" . $_->{'stops'} : ""), 
+			$hit{'id'}, $hit{'def'};
+
+		push(@{$result->{'hits'}}, $line);
+	}
+
+
+}
+
+sub get_pos_id_cov
+{
+	my $hsp = shift, my $id_hash = shift, my $cov_hash = shift;
+
+	my @ml = split(//, $hsp->{'midline'});
+	my @qs = split(//, $hsp->{'qseq'});
+	my $qo = $hsp->{'query-from'};
+
+	for (0..$#ml) 
+	{
+		if ($qs[$_] ne '-')
+		{
+			$cov_hash->{$qo+$_} = 1;
+			$id_hash->{$qo+$_} = 1 if ($ml[$_] =~ m/[A-Z\|]/); # identity annotated by the acid character or | if nucleotides
+		}
+	}
+}
+
+
+
+
+sub read_settings_file
+{
+	my $hash = shift;
+	my $settings_file = "$resource_folder/settings";
+	open(FILE, $settings_file) || die("ERROR: Unable to open $settings_file for input!\n");
+	while (<FILE>)
+	{
+		$hash->{$1} = $2 if ( m/([^=\s]+)\s*=\s*(.+)/);
+	}
+	close(FILE);
+}
+
+
+sub get_xml_childnodes
+{
+	my $node = shift;
+	my %childnodes;
+
+	while ($node =~ m/<([^>]+)>([^⭔]+?)<\/\1>/mg)
+	{
+		$childnodes{$1} = $2;
+	}
+	return \%childnodes;
+}
+
+
+
+
+
+
+sub genemap_blastxrp
+{
+	my $input_file = shift;
+	my $out_file = shift;
+	my $gene_file = shift;
+	my $stored_result = shift;
+
+	#read gene locations
+	my %genemap;
+	if (-f $gene_file)
+	{
+		open(FILE, "<$gene_file") || die("ERROR: Unable to open $gene_file for input.\n");
+		my $id;
+		while (my $line = <FILE>)
+		{
+			if ($line =~ m/^>(.+)/)
+			{
+				$id = $1;
+			}
+			elsif (defined $id)
+			{
+				push(@{$genemap{$id}}, [split(/[\t\n]+/, $line)]);
+			}
+		}
+		close(FILE);
+	}
+
+	#open input file
+	open(FILE, "<$input_file") || die("ERROR: Unable to open $input_file for input.\n");
+	my $data;
+	my @items;
+	while (my $line = <FILE>)
+	{
+		if ($line =~ m/^\s+<Iteration>\s*$/)
+		{
+			undef($data);
+		}
+		elsif ($line =~ m/^\s+<\/Iteration>\s*$/)
+		{
+			if (defined $data)
+			{
+				my $nfo = genemap_handle_data($data, \%genemap);
+				push(@items, $nfo) if (defined $nfo);
+			}
+		}
+		else
+		{
+			$data .= $line;
+		}
+	}
+	close(FILE);
+
+	#open out file and write output
+	open(OUT, ">$out_file") || die("ERROR: Unable to open $out_file for output.\n");
+	foreach (@items)
+	{
+		my ($qname, $qlen, $gm) = @$_;
+		my $qkey = $qname =~ m/^([^\s]+)/ ? $1 : $qname;
+
+		print OUT ">$qname\n";
+		print OUT "#";
+
+		my $og, my $os = 0;
+		for (0..$qlen-1)
+		{
+			if (! defined $og && $gm->[$_][1])
+			{
+				($og, $os) = ($gm->[$_][0], $_);
+			}
+			elsif (defined $og && $og ne $gm->[$_][0])
+			{
+				if (length($og))
+				{
+					push(@{$stored_result->{$qkey}}, [$og, $os, $_-1]) if (defined $stored_result);
+					print OUT "$og(" . ($os+1) . "..$_),";
+				}
+				($og, $os) = ($gm->[$_][0], $_);
+			}
+		}
+		if (defined $og && length($og) && $os < $qlen)
+		{
+			push(@{$stored_result->{$qkey}}, [$og, $os, $qlen-1]) if (defined $stored_result);
+			print OUT "$og(" . ($os+1) . "..$qlen)";
+		}
+		print OUT "\n";
+	}
+	close(OUT);
+}
+
+sub genemap_handle_data
+{
+	my $data = shift;
+	my $genemap = shift;
+
+	my %childnodes = %{get_xml_childnodes($data)};
+	my $query_name = $childnodes{"Iteration_query-def"};
+	my $query_length = $childnodes{"Iteration_query-len"};
+
+	my @result;
+	for (0..$query_length)
+	{
+		push(@result, ["", 0]);
+	}
+
+	my $hit_found = 0;
+	while ($childnodes{"Iteration_hits"} =~ m/<Hit>((.|\n)+?)<\/Hit>/mg)
+	{
+		my $hit = $1;
+		my %hit_childnodes = %{get_xml_childnodes($hit)};
+		my $hit_name = $hit_childnodes{"Hit_def"};
+		my $hit_id = $hit_childnodes{"Hit_id"};
+		my $hit_key = ($hit_id =~ m/(gb\|[^\|]+\|)/)? $1 : $hit_id;
+
+		$hit_found = $hit_found || genemap_handle_hsp($hit_childnodes{"Hit_hsps"}, $genemap->{$hit_key}, $query_length, \@result);
+		last;
+	}
+
+	# debug output and exit
+	#if ($hit_found && $query_name) {	print "#$query_name\n"; print "" . ($_ + 1) . "\t$result[$_][0]\t$result[$_][1]\n" for (0..$query_length-1); exit; }
+
+	return $hit_found ? [$query_name, $query_length, \@result] : undef;
+}
+
+sub genemap_handle_hsp
+{
+	my $hsps = shift;
+	my $hit_gene_map = shift;
+	my $query_length = shift;
+	my $result = shift;
+	my $debug_output = shift; $debug_output = 0 if (! defined $debug_output);
+
+	# create hit-map for hit
+	my %hm;
+	foreach my $gene (@$hit_gene_map)
+	{
+		$hm{$_} = $gene->[2] for ($gene->[0] .. $gene->[1]);
+	}
+
+	my $hit_found = 0;
+
+	while ($hsps =~ m/<Hsp>((.|\n)+?)<\/Hsp>/mg)
+	{
+		my $hsp = $1;
+		my %childnodes = %{ get_xml_childnodes($hsp) };
+
+		next if ($childnodes{"Hsp_bit-score"} < 40.0);
+
+		my $bit_score = $childnodes{"Hsp_bit-score"};
+		my $qfrom = $childnodes{"Hsp_query-from"};
+		my $qto = $childnodes{"Hsp_query-to"};
+		my $qframe = $childnodes{"Hsp_query-frame"};
+		my $hfrom = $childnodes{"Hsp_hit-from"};
+		my $hto = $childnodes{"Hsp_hit-to"};
+		my $qseq = $childnodes{"Hsp_qseq"};
+		my $hseq = $childnodes{"Hsp_hseq"};
+		my $midline = $childnodes{"Hsp_midline"};
+
+		my $frame = $childnodes{'Hsp_query-frame'};
+		my $qlen = $qto - $qfrom + 1;
+		my $qo = $qfrom - 1, my $qe = $qto - 1;
+		my $ho = $hfrom, my $he = $hto;
+
+		$hit_found = 1;
+
+		print "qspan=$qo..$qe\nhspan=$ho..$he\n"  if ($debug_output);
+
+		# analyze
+		my @qa = split("", $qseq), my @ha = split("", $hseq);
+		for (0..$#ha)
+		{
+			my $qoo = $frame < 0 ? $qfrom - 3 + $qe - $qo  : $qo;
+			my $gene = $hm{$ho};
+
+			$result->[$qoo] = [$gene, $bit_score] if ($bit_score > $result->[$qoo][1]);
+			$result->[$qoo+1] = [$gene, $bit_score] if ($bit_score > $result->[$qoo+1][1]);
+			$result->[$qoo+2] = [$gene, $bit_score] if ($bit_score > $result->[$qoo+2][1]);
+
+			print "add=" . $qoo . ".." . ($qoo + 2) . ", gene=$gene, from $ho\n" if ($debug_output);
+
+			$qo += 3 if ($qa[$_] ne '-');
+			++$ho if ($ha[$_] ne '-');
+		}
+		# reset $qo, $ho
+		$qo = $qfrom - 1;
+		$ho = $hfrom;
+
+		# pickup before/after match if possible
+		if ($qfrom - 1 > 0)
+		{
+			# go back a maximum of 9 positions, 3 aa positions
+			for (my $i = 0; $i <= 9; ++$i)
+			{
+				my $qoo = $frame < 0 ? $qe + $i : $qo - $i;
+				my $hoo = $ho - int(($i+2)/3);
+				my $gene = $hm{$hoo};
+				last if ($qoo < 0 || $qoo >= $query_length || ! defined $gene);
+
+				print "add=$qoo, gene=$gene, from $hoo\n" if ($debug_output);
+
+				$result->[$qoo] = [$gene, $bit_score-$i] if ($bit_score-$i > $result->[$qoo][1]);
+			}
+		}
+		if ($qto < $query_length)
+		{
+			# go forward a maximum of 9 positions, 3 aa positions
+			for (my $i = 0; $i <= 9; ++$i)
+			{
+				my $qoo = $frame < 0 ? $qo - $i :  $qe + $i;
+				my $hoo = $he + int(($i+2)/3);
+				my $gene = $hm{$hoo};
+				last if ($qoo < 0 || $qoo >= $query_length || ! defined $gene);
+
+				print "add=$qoo, gene=$gene, from $hoo\n" if ($debug_output);
+
+				$result->[$qoo] = [$gene, $bit_score-$i] if ($bit_score-$i > $result->[$qoo][1]);
+			}
+		}
+	}
+
+	exit if ($debug_output);
+
+	return $hit_found;
+}
+
+
+sub process_output_fasta_data
+{
+	my $file = shift;
+	my $data = shift;
+	my $width = shift; $width = defined $width ? $width : 60;
+
+	my $p = 0;
+	while ($p < length($data))
+	{
+		print $file substr($data, $p, $width) . "\n";
+		$p += $width;
+	}
+}
+

@@ -1,0 +1,70 @@
+#!/usr/bin/perl -w
+
+use strict;
+
+use File::Basename;
+
+my $result_folder = shift;
+my $add_count_to_name = shift; $add_count_to_name = 1 if (! defined $add_count_to_name);
+my $show_nreads = shift; $show_nreads = 0 if (! defined $show_nreads);
+
+if (! defined $result_folder)
+{
+	print "Please supply a pipeline result folder as a command line argument!\n";
+	exit;
+}
+$result_folder =~ s/[\/\\]+$//;
+
+my @result;
+
+my $total_count = 0;
+while (<$result_folder/*.txt>)
+{
+	if (-f $_)
+	{
+		my $name = basename($_, ".txt");
+		$name = uc(substr($name, 0, 1)) . lc(substr($name, 1));
+		$name =~ s/\./ /g;
+		$name =~ s/([ds]s)dna/$1DNA/;
+		$name =~ s/([ds]s)rna/$1RNA/;
+
+		my $count = 0, my $reads = 0;
+		open(FILE, $_) || die("ERROR: Unable to open $_ for input!\n");
+		while (<FILE>)
+		{
+			if ( m/^>/ )
+			{
+				++$count;
+				$reads += ( m/ nreads=(\d+)/ ? int($1) : 0);
+			}
+		}
+		close(FILE);
+		if ($count)
+		{
+			push(@result, [$name, $count, $reads]);
+			$total_count += $count;
+		}
+	}
+}
+
+@result = sort 
+{
+	if ($a->[1] != $b->[1])
+	{
+		$b->[1] <=> $a->[1];
+	}
+	else
+	{
+		$b->[2] <=> $a->[2];
+	}
+} (@result);
+
+foreach (@result)
+{
+	print "$_->[0]";
+	printf(" %.1f%% (%d)", 100 * $_->[1] / $total_count, $_->[1]) if ($add_count_to_name);
+	print "\t$_->[1]";
+	print "\t$_->[2]" if ($show_nreads);
+	print "\n";
+}
+

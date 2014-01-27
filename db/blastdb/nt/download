@@ -1,0 +1,13 @@
+#!/bin/sh
+clear
+wget ftp://ftp.ncbi.nih.gov/blast/db/nt.*tar.gz 
+
+echo ""
+echo "Extracting files..."
+ls nt.*tar.gz | while read FILE
+do
+        echo "$FILE"
+        tar -zxf $FILE
+        rm $FILE
+done
+

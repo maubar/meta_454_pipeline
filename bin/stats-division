@@ -1,0 +1,73 @@
+#!/usr/bin/perl -w
+
+use strict;
+
+use File::Basename;
+
+my $result_folder = shift;
+my $division_file = "/data/taxdb/division.dmp";
+my $add_count_to_name = shift; $add_count_to_name = 1 if (! defined $add_count_to_name);
+
+if (! defined $result_folder)
+{
+	print "Please supply a pipeline result folder as a command line argument!\n";
+	exit;
+}
+$result_folder =~ s/[\/\\]+$//;
+
+my $result_file = "$result_folder/results.txt";
+die "ERROR: $result_file not found!\n" if (! -f $result_file);
+
+
+my %divname;
+open(FILE, $division_file) || die("ERROR: Unable to open $division_file for input!\n");
+while (<FILE>)
+{
+	$divname{$1} = $2 if ( m/([A-Z]{3})\s*\|\s*(\w+)/ );
+}
+close(FILE);
+
+
+my %count;
+my $total_count = int(`grep -c '^>' $result_folder/sequences.fasta`);
+
+open(FILE, $result_file) || die("ERROR: Unable to open $result_file for input!\n");
+my $k;
+while (<FILE>)
+{
+	if ( m/^>([^\s]+)/)
+	{
+		$k = $1;
+	}
+	elsif (defined $k && m/e=([e\d\.\-]+).+?dt\|(.{3}).(\d+)/)
+	{
+		if ($1 <= 1.0 && defined $divname{$2})
+		{
+			++$count{$2};
+			undef $k;
+		}
+	}
+}
+close(FILE);
+
+
+my $found_count = 0; $found_count += $_ foreach (values %count);
+my $unknown_count = $total_count - $found_count;
+my $unknown_name = "Unknown";
+
+my @result;
+foreach (keys %count)
+{
+	push(@result, [$divname{$_}, $count{$_}]);
+}
+push(@result, [$unknown_name, $unknown_count]) if ($unknown_count);
+
+if ($add_count_to_name)
+{
+	$_->[0] .= sprintf(" %.1f%% (%d)", 100 * $_->[1] / $total_count, $_->[1]) foreach (@result);
+}
+
+foreach (sort { $b->[1] <=> $a->[1] } (@result))
+{
+	print "$_->[0]\t$_->[1]\n";
+}

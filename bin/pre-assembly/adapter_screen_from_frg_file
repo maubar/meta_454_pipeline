@@ -1,0 +1,270 @@
+#!/usr/bin/perl -w
+
+use strict;
+
+my $frg_file = shift;
+my $adapt_file = defined $ARGV[0] ? shift : ($frg_file =~ m/(.+?)\.frg$/ ? "$1.adapters" : "$frg_file.adapters");
+my $set_not_random = shift; $set_not_random = 0 if (! defined $set_not_random);
+my $min_read_length = shift; $min_read_length = 64 if (! defined $min_read_length);
+my $left_clip_threshold = shift; $left_clip_threshold = 0.80 if (! defined $left_clip_threshold); # if adapters cover 95% upto this point, this left clip will be employed
+my $known_vec_file = "known.vector";
+
+if (! defined $frg_file || ! -f $frg_file || ! -f $adapt_file)
+{
+	print STDERR "Please supply a valid frg and adapters file as a command line argument!\n";
+	exit(4);
+} 
+
+# reading adapters and known vectors
+my @adapters = @{ load_fasta($adapt_file) };
+my @known_vectors = -f $known_vec_file ? @{ load_fasta($known_vec_file) } : ();
+
+print STDERR "INFO: " . (scalar @known_vectors) . " known vetors loaded from disc.\n";
+
+# determine left-clip
+my $left_clip = 0;
+while (1)
+{
+	++$left_clip;
+	
+	my $rc = 0, my %cs;
+	foreach (@adapters)
+	{
+		next if (length($_->[1]) < $left_clip);
+		my ($c, $mc) = ($1, $2) if ($_->[0] =~ m/>.+?count=(\d+)\/(\d+)/);
+		my $test = substr($_->[1], 0, $left_clip);
+		if (! defined $cs{$test})
+		{
+			$rc += $c/$mc;
+			$cs{$test} = 1;
+		}
+	}
+	if ($rc < $left_clip_threshold) { --$left_clip; last; }
+}
+
+# rewrite adapters list to contain only sequence array
+$adapters[$_] = [split(//, $adapters[$_]->[1])] for (0..$#adapters);
+
+
+print STDERR "INFO: " . (scalar @adapters) . " adapters loaded from disc (left-clip=$left_clip, derived from adapters).\n";
+
+print STDERR "INFO: Processing FRG-file (min-length=$min_read_length).\n";
+
+open(F, $frg_file) || die("ERROR: Unable to open $frg_file for input!\n");
+my $processed = 0, my $skipped = 0; my $remove_bases = 0;
+while (<F>)
+{
+	if ($set_not_random && m/^(isNotRandom)=\d\s*$/ )
+	{
+		print "$1=1\n";
+	}
+	elsif ( m/^{FRG/)
+	{
+		my $parts = get_frg_entry(*F);
+		
+		# screen sequence against adapters
+		my ($clen, $ltrim, $rtrim) = screen_frg_entry($parts, \@adapters, \@known_vectors, $left_clip);
+		my $trim = $ltrim + $rtrim;
+
+		# print parts
+		if ($clen >= $min_read_length)
+		{
+			print_frg_entry("FRG", $parts);
+			$remove_bases += $trim;
+		}
+		else 
+		{ 
+			++$skipped; 
+			$remove_bases += $clen + $trim; # bases skipped
+		}
+		++$processed;
+	}
+	else
+	{
+		print;
+	}
+
+}
+close(F);
+
+print STDERR "DONE: $processed entries processed, $skipped was not written because they were too short (total of $remove_bases bases trimmed or skipped)!\n";
+exit(0);
+
+
+
+
+# screen a loaded frg entry
+sub screen_frg_entry
+{
+	my $parts = shift, my $adapters = shift, my $known_vectors = shift;
+
+	my $left_clip = shift;
+	my $right_clip = 0;
+
+	# fetch sequence from parts
+	my $seq;
+	foreach (@$parts)
+	{
+		if ($_->[0] eq "seq") { $seq = $_->[1]; last; }
+	}
+	if ( ! defined $seq)
+	{
+		print STDERR "ERROR: Unable to find seq part in frg entry:\n";
+		print_frg_entry("FRG", $parts); 
+		exit(1);
+	}
+
+	# create sequence array
+	my @seq = split(//, $seq);
+	
+	# match against all adapters
+	$left_clip = max($left_clip, adapter_match(\@seq, $_)) foreach (@$adapters);
+
+	# scanning sequence for known vectors
+	foreach (@$known_vectors)
+	{
+		my $vec_len = length($_->[1]), my $seq_len = length($seq) - $left_clip - $right_clip;
+		my $kvi = index(substr($seq, $left_clip, $seq_len), $_->[1]);
+		if ($kvi != -1)
+		{
+			my $knv_lc = $left_clip + $kvi + $vec_len;
+			my $knv_rc = $seq_len - $kvi;
+
+			my $remain_to_the_right = length($seq) - $knv_lc;
+			my $remain_to_the_left = $kvi;
+
+			if ($remain_to_the_right > $remain_to_the_left)
+			{
+				$left_clip = $knv_lc;
+			}
+			else
+			{
+				$right_clip = $knv_rc;
+			}
+		}
+	}
+	
+	# update entry
+	foreach (@$parts)
+	{
+		$_->[1] = substr($_->[1], $left_clip, length($_->[1]) - $left_clip - $right_clip) if ($_->[0] eq "seq") ;
+		$_->[1] = substr($_->[1], $left_clip, length($_->[1]) - $left_clip - $right_clip) if ($_->[0] eq "qlt") ;
+		
+		if ($_->[0] eq "clm" || $_->[0] eq "clr" || $_->[0] eq "clq")
+		{
+			my @p = split(/,/, $_->[1], 2);
+			$_->[1] = max(0, $p[0] - $left_clip - $right_clip) . "," . max(0, $p[1] - $left_clip - $right_clip);
+		}
+	}
+
+	# return remaining length and number of bases trimmed to the left and right
+	return ((scalar @seq) - $left_clip - $right_clip, $left_clip, $right_clip);
+}
+
+sub adapter_match
+{
+	my $seq = shift, my $adapter = shift;
+	my $high = $#$adapter; $high = $#$seq if ($#$seq < $high);
+
+	for (0..$high)
+	{
+		return $_ if ($seq->[$_] ne $adapter->[$_]);
+	}
+	return $high + 1;
+}
+
+# writes the frg entry passed to stdout
+sub print_frg_entry
+{
+	my $name = shift, my $parts = shift, my $max_line_width = 70;
+
+	print "{$name\n";
+	foreach (@$parts)
+	{
+		my ($k, $v, $multiline) = @$_;
+		if (!$multiline)
+		{
+			print "$k:$v\n";
+		}
+		else
+		{
+			print "$k:\n";
+			my $len = length $v;
+			my $p = 0;
+			while ($p < $len)
+			{
+				# print a line
+				my $left = $len - $p;
+				my $plen = $left < $max_line_width ? $left : $max_line_width;
+	
+				print substr($v, $p, $plen) . "\n"; $p += $plen;
+			}			
+			print ".\n";
+		}
+	}
+	print "}\n";
+}
+
+# reading a frg file entry from an frg file passed to the function
+sub get_frg_entry
+{
+	my $f = shift; my @r;
+
+	while (<$f>)
+	{
+		chomp;
+		last if ( m/^}$/ );
+		if ( m/([^:]+):(.+)$/ )
+		{
+			push(@r, [$1, $2, 0]);
+		}
+		elsif ( m/([^:]+):$/ )
+		{
+			my $k = $1, my $v = "";
+			while (<$f>)
+			{
+				chomp;
+				last if ( m/^\.$/);
+				$v .= $_;
+			}
+			push(@r, [$k, $v, 1]);
+		}
+
+	}
+	return \@r;
+}
+
+#loading FASTA content of provided file
+sub load_fasta
+{
+	my $file_name = shift; my @r;
+	open(LFF, $file_name) || die("ERROR: Unable to open $file_name for input!\n");
+	my $h, my $d;
+	while (<LFF>)
+	{
+		chomp;
+		if ( m/^>/ )
+		{
+			push(@r, [$h, $d]) if (defined $d);
+			$h = $_; undef $d;
+		}
+		elsif (defined $h) { $d .= $_; }
+	}
+	push(@r, [$h, $d]) if (defined $d);
+	close(LFF);
+	return \@r;
+}
+
+# ordinary max/min functions
+sub max
+{
+	my $m = shift;
+	foreach (@_) { $m = $_ if ($_ > $m); }
+	return $m;
+}
+sub min
+{
+	my $m = shift;
+	foreach (@_) { $m = $_ if ($_ < $m); }
+	return $m;
+}

@@ -1,0 +1,32 @@
+#!/usr/bin/perl -w
+
+use strict;
+
+my $seq = shift;
+my @files = @ARGV;
+
+if (! defined $seq || scalar @files == 0)
+{
+	print STDERR "Please supply at least one FASTA file an one or several blast-short result files\n";
+	exit(1);
+}
+
+my %keys;
+foreach (@files)
+{
+	open(F, $_) || die("ERROR: Unable to open $_ for input!\n");
+	while (<F>)
+	{
+		$keys{$1} = $_ if ( m/^>(\S+)/ );
+	}
+	close(F);
+}
+
+my $w = 0;
+open(F, $seq) || die("ERROR: Unable to open $seq for input!\n");
+while (<F>)
+{
+	($w, $_) = (defined $keys{$1}, $keys{$1}) if ( m/^>(\S+)/);
+	print if ($w);
+}
+close(F);

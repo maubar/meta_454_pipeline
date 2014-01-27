@@ -1,0 +1,158 @@
+#!/usr/bin/python
+
+from pylab import *
+import re
+
+max_pie_count = 27
+lowest_part_threshold = 0.00745
+
+#                  0            1         2          3          4            5        6         7          8            9        10          11         12        13
+color_values = ('#004586', '#c5000b', '#ffd320', '#3578ab', '#579d1c', '#ff950e', '#612626', '#ae28a6', '#7b7b7b', '#83caff', '#ffed23', '#314004', '#9f3030', '#000000');
+color_values_count = len(color_values);
+
+color_lookup = {
+	'Bacteria'			: color_values[0], 
+	'Invertebrates'	: color_values[9], 
+	'Mammals'			: color_values[2],
+	'Phages'				: color_values[3],
+	'Plants'				: color_values[4],
+	'Primates'			: color_values[5], 
+	'Rodents'			: color_values[6],
+	'Synthetic'			: color_values[7],
+	'Unassigned'		: color_values[11],
+	'Viruses'			: color_values[1],
+	'Vertebrates'		: color_values[10],
+	'Environmental'	: color_values[12],
+	'Environmental samples'	: color_values[12],
+	'Undefined' 		: color_values[8], 
+	'Unknown' 			: color_values[13], 
+	'Others'				: color_values[4], 
+
+	'Paramyxoviridae'	: color_values[0], 
+	'Picornaviridae'	: color_values[1], 
+	'Orthomyxoviridae': color_values[2], 
+	'Coronaviridae'	: color_values[3], 
+	'Anelloviridae'	: color_values[4], 
+	'Parvoviridae'		: color_values[5], 
+	'Polyomaviridae'	: color_values[6], 
+	'Circoviridae'		: color_values[7], 
+	'Chrysoviridae'	: color_values[8], 
+	'Phycodnaviridae'	: color_values[9], 
+	'Adenoviridae'		: color_values[10], 
+	'Herpesviridae'	: color_values[11], 
+	'Mimiviridae' 		: color_values[12], 
+	'Baculoviridae'	: color_values[13], 
+
+	'Flaviviridae'		: color_values[1], 
+};
+
+
+
+def main():
+	if (len(sys.argv) <= 1):
+
+		print "Please supply an outfile base as a command line argument!";
+		sys.exit(5);
+
+	outfile_base = sys.argv[1];
+
+	stats = [];
+	for line in sys.stdin:
+		m = re.match('([^\t]+)\t(\d+)', line);
+		if (m):
+			stats.append([m.group(1), m.group(2)]);
+
+	#analyze sizes
+	total_count = 0;
+	for value in stats:
+		total_count += int(value[1]);
+
+	min_count = total_count * lowest_part_threshold;
+
+	clean_stats = [];
+	others_count = 0;
+	for value in stats:
+		count = int(value[1]);
+		if (count >= min_count):
+			clean_stats.append([value[0], value[1]]);
+		else:
+			others_count += count;
+	
+	if (others_count > 0):
+		key = "Others (%.2f%%) %d" % ((100 * others_count / float(total_count)), others_count)
+		clean_stats.append([key, others_count, '#444444']);
+
+	if (len(stats)):
+		if (others_count):
+			handle_stats(clean_stats, outfile_base + "-clean", 8, 'png');
+			handle_stats(clean_stats, outfile_base + "-clean", 8, 'eps');
+
+		handle_stats(stats, outfile_base, 8, 'png');
+		handle_stats(stats, outfile_base, 8, 'eps');
+	else:
+		print "No entries found!"
+
+
+def handle_stats(stats, outfile_base, size, format):
+	
+	labels = [];
+	fracs = [];
+	colors = [];
+
+	no_color_count = 0;
+	pie_count = 0
+	max_name_len = 0
+
+	for value in stats:
+		name = value[0];
+		count = int(value[1]);
+
+		fracs.append(count);
+		labels.append(name);
+
+		if (len(name) > max_name_len):
+			max_name_len = len(name)
+	
+		key = name
+		m = re.match('^([\w\- ]+)\s+\d*', name)
+		if (m):
+			key = m.group(1).rstrip()
+		else:
+			print "%s did not match pattern" % name
+
+		if (len(value) < 3):
+			if (key in color_lookup):
+				colors.append(color_lookup[key]);
+			else:
+				colors.append(color_values[no_color_count % color_values_count]);
+				no_color_count += 1;
+				print "%s not found in color map" % key
+		else:
+			colors.append(value[2]);
+
+		pie_count += 1;
+		if (pie_count >= max_pie_count):
+			break;
+
+	add_to_width = 3.2
+	if (max_name_len > 20):
+		add_to_width = add_to_width + float(max_name_len - 20) / 8.8
+
+	fig_height = size;
+	fig_width = fig_height + add_to_width; 
+	fig = figure(1, figsize=(fig_width, fig_height));
+	ax = axes([0, 0, float(fig_height)/float(fig_width), 1]);
+	ax.pie(fracs, colors=colors, shadow=False); #autopct='%1.1f%%',
+	loc_y = (1.0 - 0.035808 * (pie_count + 0.5)) / 2
+	ax.legend(labels, loc=[0.95, loc_y]);
+
+	file_name = "%s.%s" % (outfile_base, format);
+	fig.savefig(file_name, format=format);
+	cla(); 
+	clf();
+	close();
+
+if __name__ == "__main__":
+    main()
+
+

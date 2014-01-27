@@ -1,0 +1,791 @@
+#!/usr/bin/perl -w
+
+use strict;
+use File::Basename;
+
+my $result_folder = shift;
+my $taxonmy_home = "db/taxdb";
+
+
+if (! defined $result_folder)
+{
+	print "Please supply a pipeline result folder as a command line argument!\n";
+	exit;
+}
+$result_folder =~ s/[\/\\]+$//;
+
+
+
+
+
+
+
+$| = 0;
+
+
+
+
+
+#
+# calculating library statistics
+#
+
+print "INFO: Producing library statistics...";
+
+my $stats_folder = "$result_folder/stats"; mkdir($stats_folder) if (! -d $stats_folder);
+
+open(OUT, ">", "$stats_folder/library.txt") || die("ERROR: Unable to open $stats_folder/library.txt for output!\n");
+my $seq_stats = get_fasta_stats("$result_folder/sequences.fasta");
+print " done\n";
+
+print OUT get_library_stats($result_folder);
+
+my $screened = get_screened_stats($result_folder);
+if (defined $screened && defined $screened->{'total'} && $screened->{'total'})
+{
+	print OUT "#number of screened reads\n";
+	print OUT "$_\t$screened->{$_}\n" foreach (sort { $a cmp $b } (keys %$screened));
+	print OUT "\n\n";
+	print OUT "#nreads after screening, assembly\n";
+}
+else
+{
+	print OUT "#nreads after assembly\n";
+}
+
+
+print OUT "total\t" . ($seq_stats->{'contig-nreads-total'} + $seq_stats->{'singlets'}) . "\n";
+print OUT "contigs\t$seq_stats->{'contig-nreads-total'}\n";
+print OUT "singlets\t $seq_stats->{'singlets'}\n";
+printf OUT "nbases\t%s\n\n\n", format_nbases($seq_stats->{'contig-length-total'} + $seq_stats->{'singlet-length-total'});
+
+print OUT "#length summery (assembled data)\n";
+print OUT substr($_, 7) . "\t$seq_stats->{$_}\n" foreach (('length-max', 'length-min', 'length-total'));
+printf OUT "average\t%.3f\n\n\n", $seq_stats->{'length-avg'};
+
+print OUT "#singlets\n";
+print OUT "count\t$seq_stats->{'singlets'}\n";
+print OUT substr($_, 15) . "\t$seq_stats->{$_}\n" foreach (('singlet-length-max', 'singlet-length-min'));
+printf OUT "average\t%.3f\n", $seq_stats->{'singlet-length-avg'};
+printf OUT "nbases\t%s\n\n\n", format_nbases($seq_stats->{'singlet-length-total'});
+
+print OUT "##contigs\n";
+print OUT "count\t$seq_stats->{'contigs'}\n\n";
+print OUT "#nreads\n";
+print OUT substr($_, 14) . "\t$seq_stats->{$_}\n" foreach (('contig-nreads-max', 'contig-nreads-min'));
+printf OUT "average\t%.3f\n\n", $seq_stats->{'contig-nreads-avg'};
+print OUT "#coverage\n";
+print OUT substr($_, 11) . "\t$seq_stats->{$_}\n" foreach (('contig-cov-max', 'contig-cov-min'));
+printf OUT "average\t%.3f\n\n", $seq_stats->{'contig-cov-avg'};
+print OUT "#length\n";
+print OUT substr($_, 14) . "\t$seq_stats->{$_}\n" foreach (('contig-length-max', 'contig-length-min'));
+printf OUT "average\t%.3f\n", $seq_stats->{'contig-length-avg'};
+printf OUT "nbases\t%s\n\n", format_nbases($seq_stats->{'contig-length-total'});
+printf OUT "\n";
+
+close(OUT);
+
+sub format_nbases
+{
+	my $nbases = shift;
+	my @factors = ("bases", "kilobases", "megabases", "gigabases");
+	for (0..$#factors-1)
+	{
+		return sprintf("%.3f %s", $nbases / 1000 ** $_, $factors[$_]) if ($nbases < 1000 ** ($_+1));
+	}
+	return sprintf("%.3f %s", $nbases / 1000 ** $#factors, $factors[$#factors]);
+}
+
+#
+# done calculating library stats
+#
+
+
+
+#
+# perform further splits of viral families
+#
+
+print "INFO: Searching for splits of virus familes!\n";
+
+my @further_analysis_splits;
+while (<$result_folder/analyze/VRL/*.txt>)
+{
+	my $name = basename($_, ".txt");
+	my $split_file = "$taxonmy_home/extract.virus-$name.out";
+	if (-f $split_file)
+	{
+		# make sure we have more than one sequence
+		my $c = int(`grep '^>' -c $_`);
+		next if ($c <= 1);
+
+		print " splitting viral family $name...";
+		if (system("./bin/taxnode_split $_ $split_file > /dev/null") != 0)
+		{
+			print "error!\n";
+			print "ERROR: process taxnode_split died unexpectedly!\n";
+			exit(3);
+		}
+		print "done.\n";
+
+		# add to further analysis splits
+		my $new_dir = dirname($_) . "/" . $name . "/";
+		push(@further_analysis_splits, ["virus.family.$name", $new_dir, $name]);
+
+		# further split into strains
+		while (<$new_dir*.txt>)
+		{
+			my $species = basename($_, ".txt");
+			my $split_file = "$taxonmy_home/extract.virus-$species.out";
+			if (-f $split_file)
+			{
+				# make sure we have more than one sequence
+				my $c = int(`grep '^>' -c $_`);
+				next if ($c <= 1);
+
+				print "  further splitting viral species $species...";
+				if (system("./bin/taxnode_split $_ $split_file > /dev/null") != 0)
+				{
+					print "error!\n";
+					print "ERROR: process taxnode_split died unexpectedly!\n";
+					exit(3);
+				}
+				print "done.\n";
+
+				# add to further analysis splits
+				push(@further_analysis_splits, ["virus.family.$name.$species", $new_dir . $species . "/", "$name/$species"]);
+			}
+		}
+	}
+}
+
+print "INFO: Searching for splits of bacteria classes!\n";
+
+while (<$result_folder/analyze/BCT/*.txt>)
+{
+	my $name = basename($_, ".txt");
+	my $split_file = "$taxonmy_home/extract.bacteria-$name.out";
+	if (-f $split_file)
+	{
+		# make sure we have more than one sequence
+		my $c = int(`grep '^>' -c $_`);
+		next if ($c <= 1);
+
+		print "INFO: splitting bacteria class $name...";
+		if (system("./bin/taxnode_split $_ $split_file > /dev/null") != 0)
+		{
+			print "error!\n";
+			print "ERROR: process taxnode_split died unexpectedly!\n";
+			exit(3);
+		}
+		print "done.\n";
+
+		# add to further analysis splits
+		push(@further_analysis_splits, ["bacteria.class.$name", dirname($_) . "/" . $name . "/", $name]);
+	}
+}
+
+
+
+#
+# producing candidates
+#
+
+print "INFO: Producing candidates for run!\n";
+open(PROC, "-|", "./bin/candidates $result_folder") || die("ERROR: Unable to open candidates script!\n");
+print " " . lc(substr($_, 6,1)) . substr($_, 7) while (<PROC>);
+close(PROC);
+
+
+
+
+#
+# produce results stats
+#
+
+print "INFO: Producing result statistics\n";
+
+my $results_file = "$result_folder/results.txt";
+if (!-f $results_file)
+{
+	print STDERR "ERROR: Unable to find $results_file, re-run search-pipeline!\n";
+	exit(3);
+}
+
+my %stats, my $w, my $key, my @keys;
+
+open(OUT, ">", "$stats_folder/results.txt") || die("ERROR: Unable to open $stats_folder/results.txt for output!\n");
+
+#
+# do confidential groups
+#
+open(FILE, "-|", "./bin/get-parts-stats $result_folder/results-*.txt") || die("ERROR: Unable to start statistics calculation on $result_folder/result-*.txt");
+print " confidential groups...";
+print OUT "##result divided into confidential groups\n";
+$w = 0; $key = 0; @keys = ();
+while (<FILE>)
+{
+	$w = 1 if ( m/^#s/ );
+	if ($w)
+	{
+		if ( m/^#([^\s]+)/ )
+		{
+			$key = $1; push(@keys, "groups-$key");
+		}
+		else
+		{
+			$stats{"groups-$key"} .= $_;
+		}
+
+		s/([\d\.]+%)\s*\(\d+\)(\t\d+)/($1)$2/;
+		print OUT "\n" if ( m/^#/);
+		print OUT;
+	}
+
+	$stats{"$_-sort"} = sort_stats($stats{$_}) foreach (@keys);
+}
+print OUT "\n\n";
+close(FILE);
+print " done.\n";
+
+#
+# do division splits
+#
+open(FILE, "-|", "./bin/get-div-stats $results_file") || die("ERROR: Unable to start statistics calculation on $results_file");
+print " taxonomy division split by closest homologue...";
+print OUT "##result divided into taxonomy division split by closest homologue\n";
+$w = 0; $key = 0; @keys = ();
+while (<FILE>)
+{
+	$w = 1 if ( m/^#s/ );
+	if ($w)
+	{
+		if ( m/^#([^\s]+)/ )
+		{
+			$key = $1; push(@keys, "division-split-$key");
+		}
+		else
+		{
+			$stats{"division-split-$key"} .= $_;
+		}
+
+		s/([\d\.]+%)\s*\(\d+\)(\t\d+)/($1)$2/;
+		print OUT "\n" if ( m/^#/);
+		print OUT;
+	}
+
+	$stats{"$_-sort"} = sort_stats($stats{$_}) foreach (@keys);
+}
+print OUT "\n\n";
+close(FILE);
+print " done.\n";
+
+#
+# do undefined
+#
+if (-f "$result_folder/results-UND.txt")
+{
+	open(FILE, "-|", "./bin/get-div-stats $result_folder/results-UND.txt") || die("ERROR: Unable to start statistics calculation on $result_folder/results-UND.txt");
+	print " undefined group, split into taxonomy divisions...";
+	print OUT "##result of undefined group (divided into taxonomy division split by closest homologue)\n";
+	$w = 0; $key = 0;
+	while (<FILE>)
+	{
+		$w = 1 if ( m/^#s/ );
+		if ($w)
+		{
+			if ( m/^#([^\s]+)/ )
+			{
+				$key = $1; 
+			}
+			else
+			{
+				$stats{"undefined-$key"} .= $_;
+			}
+
+			s/([\d\.]+%)\s*\(\d+\)(\t\d+)/($1)$2/;
+			print OUT "\n" if ( m/^#/);
+			print OUT;
+		}
+	}
+	print OUT "\n\n";
+	close(FILE);
+	print " done.\n";
+}
+
+
+#
+# do undefined viral splits
+#
+my $und_vrl_folder = "$result_folder/analyze/UND-VRL/split/";
+if (-d $und_vrl_folder)
+{
+	open(FILE, "-|", "./bin/get-parts-stats $und_vrl_folder*.txt") || die("ERROR: Unable to start statistics calculation on $und_vrl_folder*.txt");
+	print " viral families of undefined...";
+	print OUT "##viral part of the undefined result, divided into families\n";
+	$w = 0; $key = 0; @keys = ();
+	while (<FILE>)
+	{
+		$w = 1 if ( m/^#s/ );
+		if ($w)
+		{
+			if ( m/^#([^\s]+)/ )
+			{
+				$key = $1; push(@keys, "undefined.virus.family-$key");
+			}
+			else
+			{
+				$stats{"undefined.virus.family-$key"} .= $_;
+			}
+
+			s/([\d\.]+%)\s*\(\d+\)(\t\d+)/($1)$2/;
+			print OUT "\n" if ( m/^#/);
+			print OUT;
+		}
+	}
+	print OUT "\n\n";
+	close(FILE);
+	print " done.\n";
+
+	$stats{"$_-sort"} = sort_stats($stats{$_}) foreach (@keys);
+}
+
+#
+# do undefined bacterial splits
+#
+
+my $und_bct_folder = "$result_folder/analyze/UND-BCT/split/";
+if (-d $und_bct_folder)
+{
+	open(FILE, "-|", "./bin/get-parts-stats $und_bct_folder*.txt") || die("ERROR: Unable to start statistics calculation on $und_bct_folder*.txt");
+	print " bacterial families of undefined...";
+	print OUT "##bacterial part of the result, divided into classes\n";
+	$w = 0; $key = 0; @keys = ();
+	while (<FILE>)
+	{
+		$w = 1 if ( m/^#s/ );
+		if ($w)
+		{
+			if ( m/^#([^\s]+)/ )
+			{
+				$key = $1; push(@keys, "undefined.bacteria.class-$key");
+			}
+			else
+			{
+				$stats{"undefined.bacteria.class-$key"} .= $_; 
+			}
+
+			s/([\d\.]+%)\s*\(\d+\)(\t\d+)/($1)$2/;
+			print OUT "\n" if ( m/^#/);
+			print OUT;
+		}
+	}
+	print OUT "\n\n";
+	close(FILE);
+	print " done.\n";
+
+	$stats{"$_-sort"} = sort_stats($stats{$_}) foreach (@keys);
+}
+
+#
+# do others
+#
+if (-f "$result_folder/results-OTR.txt")
+{
+	open(FILE, "-|", "./bin/get-div-stats $result_folder/results-OTR.txt") || die("ERROR: Unable to start statistics calculation on $result_folder/results-OTR.txt");
+	print " others group, split into taxonomy divisions...";
+	print OUT "##result of others group (divided into taxonomy division split by closest homologue)\n";
+	$w = 0; $key = 0;
+	while (<FILE>)
+	{
+		$w = 1 if ( m/^#s/ );
+		if ($w)
+		{
+			if ( m/^#([^\s]+)/ )
+			{
+				$key = $1;
+			}
+			else
+			{
+				$stats{"others-$key"} .= $_;
+			}
+
+			s/([\d\.]+%)\s*\(\d+\)(\t\d+)/($1)$2/;
+			print OUT "\n" if ( m/^#/);
+			print OUT;
+		}
+	}
+	print OUT "\n\n";
+	close(FILE);
+	print " done.\n";
+}
+
+#
+# do mammals
+#
+if (-f "$result_folder/results-MAM.txt")
+{
+	open(FILE, "-|", "./bin/get-div-stats $result_folder/results-MAM.txt") || die("ERROR: Unable to start statistics calculation on $result_folder/results-MAM.txt");
+	print " mammals group, split into taxonomy divisions...";
+	print OUT "##result of mammals group (divided into taxonomy division split by closest homologue)\n";
+	$w = 0; $key = 0;
+	while (<FILE>)
+	{
+		$w = 1 if ( m/^#s/ );
+		if ($w)
+		{
+			if ( m/^#([^\s]+)/ )
+			{
+				$key = $1;
+			}
+			else
+			{
+				$stats{"mammals-$key"} .= $_;
+			}
+
+			s/([\d\.]+%)\s*\(\d+\)(\t\d+)/($1)$2/;
+			print OUT "\n" if ( m/^#/);
+			print OUT;
+		}
+	}
+	print OUT "\n\n";
+	close(FILE);
+	print " done.\n";
+}
+
+#
+# do viral splits
+#
+my $vrl_folder = "$result_folder/analyze/VRL/";
+if (-d $vrl_folder)
+{
+	open(FILE, "-|", "./bin/get-parts-stats $vrl_folder*.txt") || die("ERROR: Unable to start statistics calculation on $vrl_folder*.txt");
+	print " viral families...";
+	print OUT "##viral part of the result, divided into families\n";
+	$w = 0; $key = 0; @keys = ();
+	while (<FILE>)
+	{
+		$w = 1 if ( m/^#s/ );
+		if ($w)
+		{
+			if ( m/^#([^\s]+)/ )
+			{
+				$key = $1; push(@keys, "virus.family-$key");
+			}
+			else
+			{
+				$stats{"virus.family-$key"} .= $_;
+			}
+
+			s/([\d\.]+%)\s*\(\d+\)(\t\d+)/($1)$2/;
+			print OUT "\n" if ( m/^#/);
+			print OUT;
+		}
+	}
+	print OUT "\n\n";
+	close(FILE);
+	print " done.\n";
+
+	$stats{"$_-sort"} = sort_stats($stats{$_}) foreach (@keys);
+}
+
+#
+# do bacterial splits
+#
+
+my $bct_folder = "$result_folder/analyze/BCT/";
+if (-d $bct_folder)
+{
+	open(FILE, "-|", "./bin/get-parts-stats $bct_folder*.txt") || die("ERROR: Unable to start statistics calculation on $bct_folder*.txt");
+	print " bacterial families...";
+	print OUT "##bacterial part of the result, divided into classes\n";
+	$w = 0; $key = 0; @keys = ();
+	while (<FILE>)
+	{
+		$w = 1 if ( m/^#s/ );
+		if ($w)
+		{
+			if ( m/^#([^\s]+)/ )
+			{
+				$key = $1; push(@keys, "bacteria.class-$key");
+			}
+			else
+			{
+				$stats{"bacteria.class-$key"} .= $_;
+			}
+
+			s/([\d\.]+%)\s*\(\d+\)(\t\d+)/($1)$2/;
+			print OUT "\n" if ( m/^#/);
+			print OUT;
+		}
+	}
+	print OUT "\n\n";
+	close(FILE);
+	print " done.\n";
+
+	$stats{"$_-sort"} = sort_stats($stats{"$_"}) foreach (@keys);
+}
+
+#
+# do further splits
+#
+foreach (@further_analysis_splits)
+{
+	my $name = $_->[0]; my $nice_name = $name; $nice_name =~ s/[-\.]+/ /g;
+	my $directory = $_->[1];
+
+	open(FILE, "-|", "./bin/get-parts-stats $directory*.txt") || die("ERROR: Unable to start statistics calculation on $directory*.txt");
+	print " further splits of $nice_name...";
+	print OUT "##$nice_name part of the result, further divided\n";
+	$w = 0; $key = 0; @keys = ();
+	while (<FILE>)
+	{
+		$w = 1 if ( m/^#s/ );
+		if ($w)
+		{
+			if ( m/^#([^\s]+)/ )
+			{
+				$key = $1; push(@keys, "$name-$key");
+			}
+			else
+			{
+				$stats{"$name-$key"} .= $_;
+			}
+
+			s/([\d\.]+%)\s*\(\d+\)(\t\d+)/($1)$2/;
+			print OUT "\n" if ( m/^#/);
+			print OUT;
+		}
+	}
+	print OUT "\n\n";
+	close(FILE);
+	print " done.\n";
+
+	$stats{"$_-sort"} = sort_stats($stats{$_}) foreach (@keys);
+}
+
+
+close(OUT);
+
+
+
+
+#
+# run further group analysis
+#
+
+my $group_analysis_folder = "./bin";
+my @group_analysis = (
+	['VRL/picornaviridae.txt', "resources/enterovirus-split"]
+);
+foreach (@group_analysis)
+{
+	my $fasta_file = "$result_folder/sequences.fasta";
+	my $short_result_file = "$result_folder/analyze/$_->[0]";
+	my $resource_folder = "$group_analysis_folder/$_->[1]";
+
+	if (-f $short_result_file && -d $resource_folder)
+	{
+		system("$group_analysis_folder/group_analyze $short_result_file $fasta_file $resource_folder");
+	}
+}
+
+
+
+#
+# create pie-charts for all stats
+#
+
+print "INFO: Creating pie-charts!\n";
+
+my $charts_folder = "$result_folder/charts";
+mkdir($charts_folder) if (! -d $charts_folder);
+foreach (sort { $a cmp $b } (keys %stats))
+{
+	print " creating pie-chart for $_\n";
+	open(PROC, "|-", "./bin/pie-chart $charts_folder/$_ > /dev/null");
+	print PROC $stats{$_};
+	close(PROC);
+}
+
+print "DONE: Good bye.\n";
+exit(0);
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#
+# FUNCTIONS
+#
+
+
+sub get_fasta_stats
+{
+	my $fasta = shift;
+	my %stats = (
+		'contigs' => 0, 'contig-nreads-total' => 0, 
+		'contig-length-count' => 0, 'contig-length-total' => 0, 
+		'contig-cov-count' => 0, 'contig-cov-total' => 0, 
+		'singlets' => 0, 
+		'singlet-length-count' => 0, 'singlet-length-total' => 0, 
+		'length-count' => 0, 'length-total' => 0
+	);
+
+	open(FILE, $fasta) || die("ERROR: Unable to open $fasta for input!\n");	
+	while (<FILE>)
+	{
+		#>mucus_rna_c2 length=6244 nreads=5721 ccov=153.8(13-1103) type=ER8QEOW02(3282),FC8LRL302(2439) origin=RNA samples=ER8QEOW02(3282),FC8LRL302(2439)
+		if ( m/^>([^\s]+)\s+(.+)/ )
+		{
+			my $key = $1;
+			my $ci = $2; 
+			my %ci; $ci{$1} = $2 while ($ci =~ m/([^=\s]+)=([^\s]+)/g);
+
+			if (defined $ci{'nreads'} && $ci{'nreads'} > 1)
+			{
+				# contig
+				++$stats{'contigs'};
+				$stats{'contig-nreads-total'} += $ci{'nreads'};
+				$stats{'contig-nreads-max'} = $ci{'nreads'} if (! defined $stats{'contig-nreads-max'} || $ci{'nreads'} > $stats{'contig-nreads-max'});
+				$stats{'contig-nreads-min'} = $ci{'nreads'} if (! defined $stats{'contig-nreads-min'} || $ci{'nreads'} < $stats{'contig-nreads-min'});
+
+				if (defined $ci{'length'})
+				{
+					++$stats{'contig-length-count'};
+					$stats{'contig-length-total'} += $ci{'length'};
+					$stats{'contig-length-max'} = $ci{'length'} if (! defined $stats{'contig-length-max'} || $ci{'length'} > $stats{'contig-length-max'});
+					$stats{'contig-length-min'} = $ci{'length'} if (! defined $stats{'contig-length-min'} || $ci{'length'} < $stats{'contig-length-min'});
+				}
+
+				if (defined $ci{'ccov'} && $ci{'ccov'} =~ m/([\d.]+)/)
+				{
+					++$stats{'contig-cov-count'};
+					$stats{'contig-cov-total'} += $1;
+					$stats{'contig-cov-max'} = $1 if (! defined $stats{'contig-cov-max'} || $1 > $stats{'contig-cov-max'});
+					$stats{'contig-cov-min'} = $1 if (! defined $stats{'contig-cov-min'} || $1 < $stats{'contig-cov-min'});
+				}
+			}			
+			else
+			{
+				# not a contig
+				++$stats{'singlets'};
+
+				if (defined $ci{'length'})
+				{
+					++$stats{'singlet-length-count'};
+					$stats{'singlet-length-total'} += $ci{'length'};
+					$stats{'singlet-length-max'} = $ci{'length'} if (! defined $stats{'singlet-length-max'} || $ci{'length'} > $stats{'singlet-length-max'});
+					$stats{'singlet-length-min'} = $ci{'length'} if (! defined $stats{'singlet-length-min'} || $ci{'length'} < $stats{'singlet-length-min'});
+				}
+			}
+
+			if (defined $ci{'length'})
+			{
+				++$stats{'length-count'};
+				$stats{'length-total'} += $ci{'length'};
+				$stats{'length-max'} = $ci{'length'} if (! defined $stats{'length-max'} || $ci{'length'} > $stats{'length-max'});
+				$stats{'length-min'} = $ci{'length'} if (! defined $stats{'length-min'} || $ci{'length'} < $stats{'length-min'});
+			}
+		}
+	}
+	close(FILE);
+
+	# setup averages
+	foreach (keys %stats)
+	{
+		$stats{"$1-avg"} = $stats{"$1-count"} ? $stats{$_} / $stats{"$1-count"} : 0 if ( m/(.+)-total$/ && defined $stats{"$1-count"});
+	}
+	$stats{"contig-nreads-avg"} = $stats{'contigs'} ? $stats{'contig-nreads-total'} / $stats{'contigs'} : 0 if (defined $stats{'contigs'});
+
+	# setup max/min for unset fields
+	$stats{'contig-nreads-max'} = 0 if (! defined $stats{'contig-nreads-max'});
+	$stats{'contig-nreads-min'} = 0 if (! defined $stats{'contig-nreads-min'});
+	$stats{'contig-length-max'} = 0 if (! defined $stats{'contig-length-max'});
+	$stats{'contig-length-min'} = 0 if (! defined $stats{'contig-length-min'});
+	$stats{'contig-cov-max'} = 0 if (! defined $stats{'contig-cov-max'});
+	$stats{'contig-cov-min'} = 0 if (! defined $stats{'contig-cov-min'});
+	$stats{'singlet-length-max'} = 0 if (! defined $stats{'singlet-length-max'});
+	$stats{'singlet-length-min'} = 0 if (! defined $stats{'singlet-length-min'});
+	$stats{'length-max'} = 0 if (! defined $stats{'length-max'});
+	$stats{'length-min'} = 0 if (! defined $stats{'length-min'});
+
+	return \%stats;
+}
+
+sub get_screened_stats
+{
+	my $result_folder = shift;
+	my $stats_file = "assembly-results/" . basename($result_folder) . ".screen.stats";
+	my %result;
+
+	if (-f $stats_file)
+	{
+		open(FILE, $stats_file) || die("ERROR: Unable to open $stats_file for input!\n");
+		while (<FILE>)
+		{
+			$result{$1} = $2 if ( m/([^\t]+)\t(\d+)/ );
+		}
+		close(FILE);
+	}
+	else 
+	{
+		return undef;
+	}
+	
+	return \%result;
+}
+
+sub get_library_stats
+{
+	my $result_folder = shift;
+	my $stats_file = "assembly-results/" . basename($result_folder) . ".library.stats";
+	my $result = "";
+
+	if (-f $stats_file)
+	{
+		open(FILE, $stats_file) || die("ERROR: Unable to open $stats_file for input!\n");
+		while (<FILE>)
+		{
+			$result .= $_;
+		}
+		close(FILE);
+
+		$result .= "\n\n";
+	}
+
+	return $result;
+}
+
+sub sort_stats
+{
+	my $line = shift;
+	if (defined $line)
+	{
+		my @list = split(/\n/, $line);
+
+		@list = sort 
+		{ 
+			my $ac = $a =~ m/(\d+)$/ ? $1 : 0;
+			my $bc = $b =~ m/(\d+)$/ ? $1 : 0;
+			$bc <=> $ac;
+		} (@list);
+
+		return join("\n", @list);
+	}
+	return $line;
+}
+

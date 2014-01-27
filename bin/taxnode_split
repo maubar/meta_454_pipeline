@@ -1,0 +1,128 @@
+#!/usr/bin/perl
+
+use strict;
+
+if (scalar @ARGV < 2)
+{
+	print "Supply a BLAST \"short-result\" file to split and a nodes file as a command line argument.\n";
+	exit(0);
+}
+
+my $split_file = shift;
+my $nodes_file = shift;
+my $split_file_base = ($split_file =~ /^(.+?)\.[^.]+$/)? "$1" : "$split_file";
+my $split_file_ext = ($split_file =~ /(\.[^.]+)$/)? "$1" : "";
+my $split_folder = "$split_file_base/";
+
+my %sub_nodes;
+my %tax_id_lookup;
+
+#reading nodes to extract
+open(FILE, "<$nodes_file") || die("ERROR: Unable to open $nodes_file for input.\n");
+print "INFO: Reading nodes from $nodes_file.\n";
+my $base;
+while (my $line = <FILE>)
+{
+	if ($line =~ /^(\d+)\t(.+)/)
+	{
+		$base = $1;
+		$sub_nodes{$base} = $2;
+	}
+	elsif (defined $base && $line =~ /^>(\d+)/)
+	{
+		$tax_id_lookup{$1} = $base;
+	}
+}
+close(FILE);
+
+
+# reading file to split
+my @entries;
+my $entry;
+open(FILE, "<$split_file") || die("ERROR: Unable to open $split_file for input.\n");
+while (my $line = <FILE>)
+{
+	if ($line =~ /^>/)
+	{
+		if (defined $entry)
+		{
+			push(@entries, $entry);
+		}
+		$entry = $line;
+	}
+	else
+	{
+		$entry .= $line;
+	}
+}
+close(FILE);
+if (defined $entry)
+{
+	push(@entries, $entry);
+}
+
+# sort entries
+@entries = sort 
+{
+	(my $aid = 0, my $acov = 0) = ($1, $2) if ($a =~ m/id=([\d.]+)%.+?,cov=([\d.]+)%/);
+	(my $bid = 0, my $bcov = 0) = ($1, $2) if ($b =~ m/id=([\d.]+)%.+?,cov=([\d.]+)%/);
+	#($bid*$bcov) <=> ($aid*$acov);
+	if ($aid != $bid)
+	{
+		$bid <=> $aid;
+	}
+	else
+	{
+		$bcov <=> $acov;
+	}
+
+} (@entries);
+
+mkdir($split_folder);
+
+#reading split_file
+print "INFO: Splitting $split_file.\n";
+my %open_files, my %counts, my %invalid_base_tax_id;
+
+$invalid_base_tax_id{$_} = 1 foreach (qw/0/);
+
+foreach my $entry (@entries)
+{
+	my $base_tax_id = 0;
+	while ($entry =~ /dt\|[A-Z]{3}\.(\d+)/g)
+	{
+		$base_tax_id = (defined $tax_id_lookup{$1}) ? $tax_id_lookup{$1} : $base_tax_id;
+		last if (! defined $invalid_base_tax_id{$base_tax_id});
+	}
+
+	++$counts{$base_tax_id};
+
+	# open file if not already opened
+	my $out_file = $open_files{$base_tax_id};
+	if ( ! defined $out_file)
+	{
+		my $name = "unclassified";
+		if ($base_tax_id != 0)
+		{
+			$name = lc($sub_nodes{$base_tax_id});
+			$name =~ s/[\/\\]+/-/g;
+			$name =~ s/[\s\t,.]+/./g;
+		}
+
+		my $file_name = "$split_folder$name$split_file_ext";
+		open($out_file, ">$file_name");# || die("ERROR: Unable to open $file_name for output.\n");
+		$open_files{$base_tax_id} = $out_file;
+	}
+
+	# print entry to outfile
+	print $out_file $entry;
+}
+
+# closing open_files
+foreach my $key (keys %open_files)
+{
+	print "INFO: " . $counts{$key} . " entries written to " . ( defined $sub_nodes{$key} ? $sub_nodes{$key} :  "Unclassified" ) . "\n";
+	close($open_files{$key});
+}
+
+print "DONE: Splitting $split_file.\n";

@@ -1,0 +1,196 @@
+#!/usr/bin/perl -w
+
+use strict;
+use File::Basename;
+
+my $fasta = shift;
+my @files = @ARGV;
+my $script_folder = dirname(__FILE__);
+my @header_files = <$script_folder/dbh/*.headers.gz>; 
+#my @header_files = <$script_folder/dbh/2010-1/*.headers.gz>; push(@header_files, $_) foreach(<bin/dbh/*.headers.gz>);
+
+if (! defined $fasta || ! -f $fasta || scalar @files == 0)
+{
+	print STDERR "Please supply at least a search fasta and one result file as command line arguments!\n";
+	exit(1);	
+}
+
+
+my %gi2subj;
+# subj info fetch settings
+if (scalar @header_files)
+{
+	# processing files to load a GI list
+	for (0..$#files)
+	{
+		die "ERROR: $files[$_] is not a valid file!\n" if (! -f $files[$_]);
+		my $zipped = $files[$_] =~ m/\.gz$/;
+		open(HWD, $zipped ? "zcat $files[$_] 2>/dev/null |" : $files[$_]) || die("ERROR: Unable open $files[$_] for input" . ($zipped ? ", running through zcat" : "") . "!\n");
+		print STDERR "INFO: Loading GIs in $files[$_]\n";
+		while (<HWD>)
+		{
+			$gi2subj{$1} = "" if ( m/gi\|(\d+)/);
+		}
+		close(HWD);
+	}
+
+	print STDERR "INFO: Loading subj for " . (scalar keys %gi2subj) . " GI:s\n";
+	foreach (@header_files)
+	{
+		open(P, "-|", "zcat $_") || die("ERROR: Unable to open $_ for input through zcat!\n");
+		while (<P>)
+		{
+			my ($gi, $taxid, $div, $subj) = split(/\s+/, $_, 4);
+			foreach (split(/,/, $gi))
+			{
+				if (defined $gi2subj{$_})
+				{
+					chomp $subj;
+					$subj =~ s/(\|[^\|]+$)/|dt|$div.$taxid$1/;
+					$gi2subj{$_} = $subj;
+				}
+			}
+		}
+		close(P);
+	}
+}
+else
+{
+	print STDERR "ERROR: No database header files found, no subj subsitution possible!\n";
+	exit;
+}
+
+# open all results files for reading
+my $fdata = [[], [], [], []]; # 0 = file-handle, 1 = blast-type, 2 = buffered read line, 3 = last loaded results
+for (0..$#files)
+{
+	my $zipped = $files[$_] =~ m/\.gz$/;
+	my $fh; open($fh, $zipped ? "zcat $files[$_] 2>/dev/null |" : $files[$_]) || die("ERROR: Unable open $files[$_] for input" . ($zipped ? ", running through zcat" : "") . "!\n");
+	push(@{$fdata->[0]}, $fh);
+	push(@{$fdata->[1]}, $files[$_] =~ m/\.nr\./ ? "x" : "n");
+	push(@{$fdata->[2]}, undef);
+	push(@{$fdata->[3]}, load_next_results($_, $fdata));
+}
+
+print STDERR "INFO: Processing result files.\n";
+
+# reading FASTA
+open(FASTA, $fasta) || die("ERROR: Unable to open $fasta for input!\n");
+my $h, my $d, my $count = 0;
+while (<FASTA>)
+{
+	chomp;
+	if ( m/^>\S+/)
+	{
+		handle_query($h, $d, $fdata) if (defined $h && defined $d && ++$count);
+		$h = $_; undef $d; next;
+	}
+	$d .= $_;
+}
+handle_query($h, $d, $fdata) if (defined $h && defined $d);
+close(FASTA);
+
+print STDERR "WARN: No queries found in FASTA (expected as first argument), are you sure you provided a valid FASTA\n" if ($count == 0);
+
+# close all handles
+close $fdata->[0][$_] for (0..$#files);
+
+print STDERR "DONE: All done, good bye!\n";
+exit(0);
+
+
+
+
+
+
+
+
+
+
+
+#
+# functions
+# 
+
+# main function for processing a loaded query sequence
+sub handle_query
+{
+	my $h = shift, my $d = shift, my $fdata = shift;
+	my $k = $h =~ m/^>(\S+)/ ? $1 : undef;
+	
+	# load properties from query line
+	my %sprop; $sprop{$1} = $2 while ( $h =~ m/(\S+)=(\S+)/g); 
+	my $qlen = $sprop{'length'} = length($d);
+
+	# print header
+	print "$h\n";
+
+	# fetching results for query
+	my @r = ();
+	for my $i (0..(scalar @{$fdata->[0]} - 1))
+	{
+		if ((defined $fdata->[3][$i][0]) && $fdata->[3][$i][0] eq $k)
+		{
+			# matching result found, store and get next result for file
+			push(@r, @{$fdata->[3][$i][1]});
+			$fdata->[3][$i] = load_next_results($i, $fdata);
+		}
+	}
+
+	# print results
+	for (@r)
+	{
+		my ($type, $subj, $id, $alen, $mismatch, $gaps, $qstart, $qend, $sstart, $send, $evalue, $bitscore) = @$_;
+		my $sfrom = $sstart < $send ? $sstart : $send;
+		my $sto = $sstart < $send ? $send : $sstart;
+		my $qfrom = $qstart < $qend ? $qstart : $qend;
+		my $qto = $qstart < $qend ? $qend : $qstart;
+		my $qalen = 1+$qto-$qfrom;
+		my $qsense = ($qstart > $qend) ? "minus" : "plus";
+
+		# update subject from loaded subj
+		$subj = $gi2subj{$1} if ($subj =~ m/gi\|(\d+)\|/ && defined $gi2subj{$1} && length($gi2subj{$1}));
+
+		printf "$type:#e=$evalue,s=$bitscore,id=%.1f%%(%d/$alen),cov=%.1f%%($qalen/$qlen),qhit=$qfrom..$qto,dhit=$sfrom..$sto,sense=$qsense#>%s\n", 100*($alen-$mismatch)/$alen, $alen-$mismatch, 100*$qalen/$qlen, $subj;
+	}
+
+	# print deliminting endl
+	print "\n";
+}
+
+# loading next results of a BLAST results file
+sub load_next_results
+{
+	my $idx = shift, my $fdata = shift;
+	my $fh = $fdata->[0][$idx];
+	my $type = $fdata->[1][$idx];
+	my $nl = $fdata->[2][$idx];
+
+	my @r = (), my $k = undef;
+	while (1)
+	{
+		# get line
+		my $ln = ! defined $nl ? <$fh> : $nl; undef $nl;
+		last if (! defined $ln);
+
+		# parse line
+		if ($ln !~ m/^#/)
+		{
+			chomp $ln;
+			my @p = split(/\s+/, $ln, 12);
+			next if (scalar @p != 12);
+
+			# make sure we are not reading the next entry, if we are: store line and break
+			if (defined $k && $p[0] ne $k) { $nl = $ln; last; }
+
+			$k = shift @p;
+			push(@r, [$type, @p]);
+		}
+		elsif ( m/# BLAST(.)/i ) { $type = lc($1); }
+	}
+	
+	$fdata->[1][$idx] = $type;
+	$fdata->[2][$idx] = $nl;
+
+	return [$k, \@r];
+}

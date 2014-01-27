@@ -1,0 +1,271 @@
+#!/usr/bin/perl
+
+use strict;
+use File::Basename;
+
+my $result_folder = shift;
+my $out_folder = shift; $out_folder = "$result_folder/candidates" if (! defined $out_folder);
+
+message_die("Supply at least one result folder as a command line argument", 2) if (! defined $result_folder);
+
+
+my %result;
+my %settings = (
+	"blastx-decide-threshold" => 0.5, 
+	"filter-result-list" => [0.5, 0.6, 0.7, 0.8]
+);
+my %filter = (
+	"default" => 
+	{
+		"min-length" => 50,		# minimum length required
+		"id" => [30,85],			# per cent identity range
+		"cov" => [0,100],			# per cent coverage range
+		"ev" => [0, 1e-2],		# e-value range
+		"nid" => [0,0],			# per cent identity range for nucleotide alignments
+		"ncov" => [0,0],			# per cent coverage range for nucleotide alignments
+		"identities" => 55,		# minimum number of identites (id*cov*length)
+		"max-repetitive" => 20,	# maximum allowed per cent reptitive
+	},
+	"anelloviridae" => { "id" => [30,45], "min-length" => 400, "cov" => [50,100] },
+	"picornaviridae" => { "id" => [30,75], "min-length" => 400 },
+	"paramyxoviridae" => { "id" => [30,75], "min-length" => 400, "cov" => [50,100] },
+);
+# populate all missing fields from default
+foreach my $f (keys %filter)
+{
+	foreach my $k (keys %{$filter{'default'}})
+	{
+		$filter{$f}{$k} = $filter{'default'}{$k} if (! defined $filter{$f}{$k});
+	}
+}
+
+# reading viral family
+my %viridae_nodes; my %viridae_names;
+read_taxonomy_nodes("/data/taxdb/extract.viridae.out", \%viridae_nodes, \%viridae_names);
+
+# reading result file
+my $folder = (! -d $result_folder) ? dirname($result_folder) : $result_folder; $folder =~ s/[\\\/]+$//;
+my $result_file = "$folder/results.txt";
+my $sequence_file = "$folder/sequences.fasta";
+
+message_die("ERROR: Unable to find a result file in $folder: $result_file", 3) if (! -f $result_file);
+message_die("ERROR: Unable to find a sequence file in $folder: $sequence_file", 3) if (! -f $sequence_file);
+
+# load all results of interest
+open(FILE, $result_file) || message_die("ERROR: Unable to open $result_file for input!", 3);
+
+print "INFO: Reading results file searching for potential new virus candidates!\n";
+
+my $h, my $nd, my $xd, my $k, my $l;	
+while (<FILE>)
+{
+	if ( m/^>([^\s]+).+?length=(\d+)/)
+	{
+		filter_add(\%result, $h, $k, $l, $nd, $xd, \%filter) if (defined $h);
+		$h = $_; $k = $1; $l = $2; undef $nd; undef $xd;
+	}
+	elsif (defined $h)
+	{
+		$nd .= $_ if ( m/^[nm]/ );
+		$xd .= $_ if ( m/^x/ );
+	}
+}
+close(FILE);
+filter_add(\%result, $h, $k, $l, $nd, $xd, \%filter) if (defined $h);
+
+if (scalar keys %result == 0)
+{
+	print "DONE: No candidates found, done.\n";
+	exit(0);
+}
+
+print "INFO: " . (scalar keys %result) . " candidates found, investigating sequence!\n";
+
+
+# load sequences for results
+open(FILE, $sequence_file) || message_die("ERROR: Unable to open $result_file for input!", 3);
+while (<FILE>)
+{
+	if ( m/^>([^\s]+)/ )
+	{
+		undef $k;
+		$k = $1 if (defined $result{$1});
+	}
+	elsif (defined $k)
+	{
+		$result{$k}{'seq'} .= $_;
+	}
+}
+close(FILE);
+
+
+mkdir($out_folder) if (! -d $out_folder);
+
+# write sequence
+my $temp_all_fasta = "$out_folder/temp.fasta";
+open(OUT, ">", $temp_all_fasta) || message_die("ERROR: Unable to open $temp_all_fasta for output!", 5);
+foreach (values %result)
+{
+	print OUT "$_->{'header'}$_->{'seq'}\n";
+}
+close(OUT);
+
+print "INFO: Investigating sequences!\n";
+
+# running repeatmasker
+unlink while (<$temp_all_fasta.*>);
+if (system("./bin/repeatmasker/RepeatMasker -noint $temp_all_fasta 1> /dev/null 2>/dev/null") == 0)
+{
+	if (open(FILE, "$temp_all_fasta.masked"))
+	{
+		my $rc = 0;
+		while (<FILE>)
+		{
+			if ( m/^>([^\s]+)/ )
+			{
+				$result{$k}{'repeats'} = $rc if (defined $k);
+				$k = $1;
+			}
+			else
+			{
+				++$rc while ( m/N/g );
+			}
+		}
+		$result{$k}{'repeats'} = $rc if (defined $k);
+	}
+	close(FILE);
+
+	unlink while (<$temp_all_fasta.*>);
+}
+else
+{
+	print "WARN: Unable to run RepeatMasker to determine repetitivness of sequences!\n";
+}
+unlink($temp_all_fasta);
+
+
+print "INFO: Analyse results, and write output!\n";
+my %files, my $write_count = 0;
+open(FOUT, ">", "$out_folder/sequences.fasta");
+foreach (values %result)
+{
+	my $family = $_->{'family'};
+	my $max_repetitive = defined $filter{$family}{'max-repetitive'} ? $filter{$family}{'max-repetitive'} : $filter{"default"}{'max-repetitive'};
+
+	if ($_->{'repeats'} / $_->{'length'} < $max_repetitive)
+	{
+		my $file = $files{$family};
+		if (! defined $file)
+		{
+			open($file, ">", "$out_folder/$family.txt") || message_die("ERROR: Unable to open $out_folder/$family.txt for input!", 5);
+			$files{$family} = $file;
+		}
+
+		print {$file} "$_->{'header'}$_->{'results'}\n";
+		print FOUT "$_->{'header'}$_->{'seq'}\n";
+		++$write_count;
+	}
+}
+close(FOUT);
+close foreach (values %files);
+
+
+print "DONE: $write_count entries written to $out_folder!\n";
+
+
+
+
+
+sub filter_add
+{
+	(my $r, my $h, my $k, my $l, my $nd, my $xd, my $fh) = @_;
+
+	my $xms = defined $xd ? ($xd =~ m/s=([\d\.]+)/ ? $1 : 0) : 0;
+	my $nms = defined $nd ? ($nd =~ m/s=([\d\.]+)/ ? $1 : 0) : 0;
+	my $eval_x = $xms >= $settings{'blastx-decide-threshold'} * $nms;
+	my $d = $eval_x ? filter_result_list($xd) . "\n" . (defined $nd ? filter_result_list($nd) ."\n" : "") : filter_result_list($nd) . "\n" . (defined $xd ? filter_result_list($xd) . "\n" : "");
+
+	if ($d =~ m/dt\|([A-Z]{3})\.(\d+)/)
+	{
+		# not viral
+		return if ($1 ne "VRL");
+
+		#setup filter
+		my $family_name = defined $viridae_nodes{$2} ? $viridae_names{$viridae_nodes{$2}} : "unknown";
+		$fh = defined $fh->{$family_name} ? $fh->{$family_name} : $fh->{"default"};
+
+		# too short
+		return if ($l < $fh->{'min-length'} || (! defined $nd && ! defined $xd));
+
+		my $valid = 0;
+
+		# make sure valid by filter
+		if ($d =~ m/#e=([\d\.\-e]+),s=[\d\.]+,id=([\d\.]+)%\((\d+)\/\d+\),cov=([\d\.]+)%/)
+		{
+			$valid = $eval_x ? 
+				$1 >= $fh->{'ev'}->[0] && $1 <= $fh->{'ev'}->[1] && 
+				$2 >= $fh->{'id'}->[0] && $2 <= $fh->{'id'}->[1] && 
+				$3 >= $fh->{'identities'} && 
+				$4 >= $fh->{'cov'}->[0] && $4 <= $fh->{'cov'}->[1]
+			 :
+				$1 >= $fh->{'ev'}->[0] && $1 <= $fh->{'ev'}->[1] && 
+				$2 >= $fh->{'nid'}->[0] && $2 <= $fh->{'nid'}->[1] && 
+				$3 >= $fh->{'identities'} && 
+				$4 >= $fh->{'ncov'}->[0] && $4 <= $fh->{'ncov'}->[1]
+		}
+
+		if ($valid)
+		{
+			# add to result
+			$r->{$k} = {'header' => $h, 'results' => $d, 'length' => $l, 'id' => $2, 'cov' => $4, 'family' => $family_name};
+		}
+	}
+}
+
+sub filter_result_list
+{
+	my $d = shift;
+	my $thres = $settings{"filter-result-list"};
+	my $top, my $r;
+	
+	return $r if (! defined $d);
+
+	my $i = -1, my $t = $thres->[0];
+	foreach (split(/\n/, $d))
+	{
+		if ( m/s=([\d\.]+)/ )
+		{
+			$top = $1 if (! defined $top);
+			$r .= "$_\n" if ($1 >= $top * $t);
+			++$i; $t = $thres->[$i] if (defined $thres->[$i])
+		}
+	}
+	return $r;
+}
+
+sub read_taxonomy_nodes
+{
+	(my $file, my $nodes, my $nodenames) = @_;
+
+	my $parent_node;
+	open(FILE, $file) || message_die("ERROR: Unable to open $file for input!", 3);
+	while (<FILE>)
+	{
+			if (defined $parent_node && m/^>(\d+)/)
+			{
+				$nodes->{$1} = $parent_node;
+			}
+			elsif ( m/^(\d+)\s(.+)/ )
+			{
+				$parent_node = $1; 
+				$nodenames->{$1} = lc($2); $nodenames->{$1} =~ s/\s+/-/;
+			}
+	}
+	close(FILE);
+}
+
+sub message_die
+{
+	print STDERR "$_[0]\n" if (defined $_[0]);
+	exit(defined $_[1] ? int($_[1]) : 111);
+}

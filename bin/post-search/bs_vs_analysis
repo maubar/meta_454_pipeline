@@ -1,0 +1,314 @@
+#!/usr/bin/perl -w
+
+use strict;
+use File::Basename;
+
+my $result_file = shift;
+my $out_folder = shift;
+
+my $tax_div_pattern = "VRL|PHG";
+my $tax_div_bans = "SYN|ENV";
+my $hit_score_threshold = 0.97; 					# score relative to max-score which is relevant to species designation
+
+if (! defined $result_file)
+{
+	print STDERR "Please supply a valid bs-file as a command line argument!\n";
+	exit(1);
+}
+
+# settings
+my $node_base = 10239;
+my $rank = "species";
+my $taxdb = "taxdb/";
+my $result_folder_sufix = "vs";
+
+# get analyze_folder and out_folder if non was supplied
+my $analyze_folder = dirname($result_file) . "/analyze/";
+my %short2long = ("A" => "ambiguous", "B" => "bacterial", "E" => "environmental", "M" => "mammalian", "O" => "other", "P" => "phage", "U" => "unknown", "V" => "viral");
+$out_folder = defined $out_folder ? $out_folder : ($result_file =~ m/\.([A-Z])\.(bs|txt)/ && defined $short2long{$1} ? $short2long{$1} . "-$result_folder_sufix"  : $result_folder_sufix);
+$out_folder = substr($out_folder, length($analyze_folder)) if (index($out_folder, $analyze_folder) == 0);
+$out_folder .= "/" if ($out_folder !~ m/\/$/ );
+mkdir($analyze_folder) if (! -d $analyze_folder);
+
+
+
+
+print STDERR "INFO: Loading taxonomy tree.\n";
+my $nodes = load_tax_nodes($taxdb);
+
+
+print STDERR "INFO: Creating viral $rank taxonomy lookup.\n";
+my $species = get_nodes_by_rank($rank, $nodes, $node_base);
+my %lookup;
+foreach my $sid (@$species)
+{
+	$lookup{$sid} = $sid;
+	$lookup{$_} = $sid foreach (@{ get_all_children($nodes, $sid) });
+}
+
+
+
+print STDERR "INFO: Loading $result_file into memory and process data.\n";
+
+
+# load all results
+my $result;
+
+# reading resuls file
+open(F, $result_file) || die("ERROR: Unable to open $result_file for input!\n");
+my $h, my $d;
+while (<F>)
+{
+	chomp;
+	if ( m/^>/ )
+	{
+		push(@$result, [$h, $d]) if (defined $h && defined $d);
+		$h = $_; undef $d; next;
+	}
+	push(@$d, $_);
+}
+push(@$result, [$h, $d]) if (defined $h && defined $d);
+close(F);
+
+my $unclassified_specid = 0;
+my $non_viral_specid = -1;
+
+
+# processing results to find-out which are ambiguous or not
+my %species, my %sassignment, my @sresult;
+for my $rid (0..$#$result)
+{
+	my ($h, $d) = @{$$result[$rid]};
+
+	# process all results and fetch score, tax-id, species tax-id
+	my %results, my $max_score = 0;
+	foreach (@$d)
+	{
+		if ( m/[#,]s=([\d\.]+).+?dt\|([A-Z]{3})\.(\d+)/ )
+		{
+			my ($score, $div, $taxid) = ($1, $2, $3) ; $max_score = $score if ($score > $max_score);
+			my $is_viral_hit = $div =~ m/$tax_div_pattern/ ? 1 : 0;
+			my $specid = $is_viral_hit ? (defined $lookup{$taxid} ? $lookup{$taxid} : $unclassified_specid) : $non_viral_specid;
+			my $is_banned_div = $div =~ m/$tax_div_bans/ ? 1 : 0;
+			$results{$specid} = [$score, $is_banned_div, $taxid] if (! defined $results{$specid} || $score > $results{$specid});
+			#print "match: $score, $div, $taxid, $specid, $_\n";
+		}
+		#else { print "no-match: $_\n"; }
+	}
+
+	# store species within threshold
+	my $thres = $max_score * $hit_score_threshold;
+	my @species; my @rk = sort { $results{$b}[0] <=> $results{$a}[0] } (keys %results);
+	foreach (@rk)
+	{
+		# skip banned divions
+		if (! $results{$_}[1])
+		{
+			my $s = $results{$_}[0];
+			push(@species, $_) if ($s >= $thres);
+		}
+	}
+
+	# add info
+	foreach (@species)
+	{
+		push(@{$sassignment{$_}}, $rid);
+		++$species{$_};
+	}
+	push(@sresult, \%results);
+}
+
+
+print STDERR "INFO: Writing results into species files\n";
+
+# create out-folder and clean-up any potential previous result files
+my $work_folder = "$analyze_folder$out_folder";
+mkdir($work_folder) if (! -d $work_folder);
+unlink while (<$work_folder*.txt>);
+
+# divide result into species
+print "#seq\treads\tname\n";
+foreach my $specid (sort { ($b > 0 ? $species{$b} : $b) <=> ($a > 0 ? $species{$a} : $a) } (keys %species))
+{
+	# get all results which fall into $specid
+	my $list = $sassignment{$specid}, my @r;
+	foreach(@$list) { push(@r, $_) if (defined $$result[$_]); }
+
+	if (scalar @r)
+	{
+		my $name = specid2name($specid, $nodes); $name = lc($name); $name =~ s/\W+/./g;
+		open(F, ">", "$work_folder$name.txt") || die("ERROR: Unable to open $work_folder$name.txt for output!\n");
+		my $reads = 0;		
+		foreach (@r)
+		{
+			my $h = $$result[$_][0], my $d = $$result[$_][1], my $res = $sresult[$_];
+
+			# add reason for non-viral
+			if ( $specid == $non_viral_specid )
+			{
+				my @names; my @rk = sort { $$res{$b}[0] <=> $$res{$a}[0] } (keys %$res);
+				push(@names, specid2name($_, $nodes) . "(" . $$res{$_}[0] . ")") foreach (@rk);
+				$h .= " species=" . join("; ", @names);
+			}
+			# add species taxonomy identifier for which no species was found
+			elsif ( $specid == $unclassified_specid )
+			{
+				$h .= " species-tax-id=" . $$res{$specid}[2];  
+			}
+
+			$reads += ($h =~ m/(reads|num.frags)=(\d+)/ ? $2 : 1);
+
+			print F "$h\n" . join("\n", @$d) . "\n";
+			undef $$result[$_];
+		}
+		close(F);
+
+		printf "%d\t%d\t%s\n", scalar @r, $reads, specid2name($specid, $nodes);
+	}
+}
+
+print STDERR "INFO: Identity sorting output!\n";
+
+# identity sort result files
+my $id_sort_folder = $work_folder . "id-sort/";
+mkdir($id_sort_folder) if (! -d $id_sort_folder);
+while (<$work_folder/*.txt>)
+{
+	my $fn = basename($_);
+	my $ln = "./bin/bs_idsort $work_folder$fn > $id_sort_folder$fn";
+	if (system($ln) != 0)
+	{
+		if ($? == -1) { print STDERR "failed to execute ./bin/bs_idsort: $!\n"; }
+		elsif ($? & 127) { printf STDERR "./bin/bs_idsort died with signal %d, %s coredump\n", ($? & 127), ($? & 128) ? 'with' : 'without'; }
+		else { print STDERR "./bin/bs_idsort exited with value %d\n", $? >> 8; }
+		die;
+	}
+}
+
+print STDERR "INFO: E-value sorting output!\n";
+
+# e-value sort result files
+my $e_sort_folder = $work_folder . "e-sort/";
+mkdir($e_sort_folder) if (! -d $e_sort_folder);
+while (<$work_folder/*.txt>)
+{
+	my $fn = basename($_);
+	my $ln = "./bin/bs_esort $work_folder$fn > $e_sort_folder$fn";
+	if (system($ln) != 0)
+	{
+		if ($? == -1) { print STDERR "failed to execute ./bin/bs_esort: $!\n"; }
+		elsif ($? & 127) { printf STDERR "./bin/bs_esort died with signal %d, %s coredump\n", ($? & 127), ($? & 128) ? 'with' : 'without'; }
+		else { print STDERR "./bin/bs_esort exited with value %d\n", $? >> 8; }
+		die;
+	}
+}
+
+
+
+
+# no exec bellow these lines
+print STDERR "DONE: All done, good bye!\n";
+exit(0);
+
+
+#
+# functions
+#
+
+
+sub specid2name
+{
+	my $specid = shift, my $nodes = shift;
+	my $unclassified_specid = 0;
+	my $non_viral_specid = -1;
+
+	my $fn;
+	if ($specid > 0)
+	{
+		$fn = $nodes->{$specid}[1];
+	}
+	elsif ($specid == $non_viral_specid)
+	{
+		$fn = "Unassigned Non-Viral";
+	}
+	elsif ($specid == $unclassified_specid)
+	{
+		$fn = "Unassigned Unclassified";
+	}
+	return $fn;
+}
+
+sub get_nodes_by_rank
+{
+	my $rank = shift, my $nodes = shift, my $id = shift;
+	return [] if ( ! defined $nodes->{$id}[3]);
+	my $list = [];
+	foreach (@{$nodes->{$id}[3]})
+	{
+		push(@$list, $_) if ($nodes->{$_}[2] eq $rank);
+		push(@$list, $_) foreach (@{ get_nodes_by_rank($rank, $nodes, $_)});
+	}
+	return $list;
+}
+
+sub get_all_children
+{
+	my $nodes = shift, my $id = shift;
+	return [] if ( ! defined $nodes->{$id}[3]);
+	my $list = [];
+	foreach (@{$nodes->{$id}[3]})
+	{
+		push(@$list, $_);
+		push(@$list, $_) foreach (@{ get_all_children($nodes, $_)});
+	}
+	return $list;
+}
+
+sub load_tax_nodes
+{
+	my $taxdb = shift; $taxdb .= "/" if (! $taxdb =~ m/\/$/);
+	my $nodes_file = "nodes.dmp";
+	my $names_file = "names.dmp";
+
+	my $nodes = {};
+
+	if (-f "$taxdb$nodes_file.gz") { open(F, "-|", "zcat $taxdb$nodes_file.gz") || die("ERROR: Unable to open $taxdb$nodes_file.gz through zcat!\n"); }
+	elsif (-f "$taxdb$nodes_file") { open(F, "$taxdb$nodes_file") || die("ERROR: Unable to open $taxdb$nodes_file for intput!\n"); }
+	else { die("ERROR: Unable to locate $taxdb$nodes_file!\n"); }
+	while (<F>)
+	{
+		my ($id, $pid, $rank, $embl, $did)= split(/\s*\|\s*/);
+		my $name;
+		$nodes->{$id}[0] = $pid;
+		$nodes->{$id}[1] = $name;
+		$nodes->{$id}[2] = $rank;
+		push(@{$nodes->{$pid}[3]}, $id);
+	}
+	close(F);
+	
+	if (-f "$taxdb$names_file.gz") { open(F, "-|", "zcat $taxdb$names_file.gz") || die("ERROR: Unable to open $taxdb$names_file.gz through zcat!\n"); }
+	elsif (-f "$taxdb$names_file") { open(F, "$taxdb$names_file") || die("ERROR: Unable to open $taxdb$names_file for intput!\n"); }
+	else { die("ERROR: Unable to locate $taxdb$names_file!\n"); }
+	my $lid = -1, my $lrnk = 0;
+	while (<F>)
+	{
+		my ($id, $name, $uname, $class)= split(/\s*\|\s*/);
+		my $rnk = get_class_rank($class);
+		if ($id != $lid || $rnk > $lrnk)
+		{
+			$nodes->{$id}[1] = $name;
+			$lid = $id; $lrnk = $rnk;
+		}
+	}
+	close(F);
+
+	return $nodes;
+}
+
+sub get_class_rank
+{
+	my $class = shift;
+	return 0 if (! defined $class);
+	my %rank = ("scientific name" => 4, "genbank common name" => 3, "common name" => 1, "synonym" => 0);
+	return defined $rank{$class} ? $rank{$class} : 2;
+}

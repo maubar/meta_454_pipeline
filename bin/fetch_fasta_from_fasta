@@ -1,0 +1,29 @@
+#!/usr/bin/perl -w
+
+use strict;
+
+if (@ARGV < 2)
+{
+	print STDERR "Please supply a key fasta and a sequences fasta as command line arguments!\n";
+	exit;
+}
+
+my $keys = shift;
+my $fasta = shift;
+
+my %keys;
+open(FILE, $keys);
+while (<FILE>)
+{
+	$keys{$1} = 1 if ( m/^>([^\s]+)/);
+}
+close(FILE);
+
+my $w = 0;
+open(FILE, $fasta);
+while (<FILE>)
+{
+	$w = defined $keys{$1} if ( m/^>([^\s]+)/);
+	print if ($w);
+}
+close(FILE);

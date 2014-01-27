@@ -1,0 +1,4 @@
+#!/bin/sh
+clear
+wget ftp://ftp.ncbi.nih.gov/blast/db/FASTA/human_genomic.gz
+gunzip human_genomic.gz

@@ -1,0 +1,48 @@
+#!/usr/bin/perl -w
+
+use strict;
+
+my $result_folder = shift;
+my $out_folder = shift;
+
+if (! defined $result_folder || ! defined $out_folder)
+{
+	print STDERR "Please supply a valid result folder and an out-folder as a command line argument!\n";
+	exit(1);
+}
+
+
+
+my %result;
+my %settings = (
+	"blastx-decide-threshold" => 0.5, 
+	"filter-result-list" => [0.5, 0.6, 0.7, 0.8]
+);
+my %filter = (
+	"default" => 
+	{
+		"min-length" => 50,		# minimum length required
+		"id" => [30,85],			# per cent identity range
+		"cov" => [0,100],			# per cent coverage range
+		"ev" => [0, 1e-2],		# e-value range
+		"nid" => [0,0],			# per cent identity range for nucleotide alignments
+		"ncov" => [0,0],			# per cent coverage range for nucleotide alignments
+		"identities" => 55,		# minimum number of identites (id*cov*length)
+		"max-repetitive" => 20,	# maximum allowed per cent reptitive
+	},
+	"anelloviridae" => { "id" => [30,45], "min-length" => 400, "cov" => [50,100] },
+	"picornaviridae" => { "id" => [30,75], "min-length" => 400 },
+	"paramyxoviridae" => { "id" => [30,75], "min-length" => 400, "cov" => [50,100] },
+);
+# populate all missing fields from default
+foreach my $f (keys %filter)
+{
+	foreach my $k (keys %{$filter{'default'}})
+	{
+		$filter{$f}{$k} = $filter{'default'}{$k} if (! defined $filter{$f}{$k});
+	}
+}
+
+
+print STDERR "INFO: Finding candidates based on analyzed output!\n";
+

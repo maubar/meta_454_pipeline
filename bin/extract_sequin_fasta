@@ -1,0 +1,131 @@
+#!/usr/bin/perl -w
+
+use strict;
+use File::Basename;
+
+my $pipeline_folder = shift;
+if (! defined $pipeline_folder)
+{
+	print STDERR "Please supply a pipeline folder as a command line argument!\n";
+	exit (1);
+}
+$pipeline_folder = dirname($pipeline_folder) if (! -d $pipeline_folder);
+$pipeline_folder = $1 if ($pipeline_folder =~ m/(.+?)\/+$/);
+
+
+# settings
+my $country = "Sweden";
+my $host = "Homo sapiens";
+my $sample_type = "metagenomic";
+my $sample_rename_format = $sample_type . "_npa_lrti_%05d";
+
+print STDERR "INFO: Reading results...\n";
+
+# reading all results
+my %result;
+my @parts = ("BCT", "OTR", "VRL");
+my @header_parts = ("length", "nreads", "type", "origin");
+my $fasta_file = "$pipeline_folder/sequences.fasta";
+foreach (@parts)
+{
+	my $file_name = "results-$_.txt", my $seqid;
+	open(FILE, "$pipeline_folder/$file_name") || die("ERROR: Unable to open $pipeline_folder/$file_name for input!\n");
+
+	print STDERR " $file_name...\n";
+	while (<FILE>)
+	{
+		if ( m/^>(\S+)/ )
+		{
+			$seqid = $1;
+			$result{$seqid}{'seqid'} = $seqid;
+			foreach my $p (@header_parts)
+			{
+				$result{$seqid}{$p} = m/$p=(\S+)/ ? $1 : undef ;
+			}
+		}
+		elsif ( defined $seqid && m/>gi\|(\d+).+?dt\|([A-Z]{3})\.(\d+)\|\s*([^|]+)/ )
+		{
+			(my $gi, my $div, my $taxid, my $desc) = ($1, $2, $3, $4); chomp $desc;
+			$result{$seqid}{'gi'} = $gi;
+			$result{$seqid}{'div'} = $div;
+			$result{$seqid}{'taxid'} = $taxid;
+			$result{$seqid}{'desc'} = $desc;
+			undef $seqid;
+		}
+		elsif ( defined $seqid )
+		{
+			die "Unrecognized sequence result format:\n$_\n";
+		}
+	}
+	close(FILE);
+}
+
+print STDERR "INFO: " . (scalar keys %result) . " entries loaded!\n";
+
+
+print STDERR "INFO: reading FASTA from $fasta_file!\n";
+
+# reading all sequences
+open(FILE, $fasta_file) || die("ERROR: Unable to open $fasta_file for input!\n");
+my $w = 0; my $count = 0;
+while (<FILE>)
+{
+	if ( m/^>(\S+)/ )
+	{
+		$w = defined $result{$1};
+		if ($w)
+		{
+			$result{$1}{'id'} = sprintf($sample_rename_format, ++$count);
+			$result{$1}{'iid'} = $count;
+			print_header($result{$1}) ;
+		}
+	}
+	elsif ($w)
+	{
+		print ;
+	}
+}
+close(FILE);
+
+print STDERR "INFO: $count sequences written to STDOUT\n";
+
+
+sub print_header
+{
+	my $hash = shift;
+
+	my $id = $hash->{'id'};
+	my $dna_count = $hash->{'type'} =~ m/DNA\((\d+)\)/ ? $1 : 0;
+	my $rna_count = $hash->{'type'} =~ m/RNA\((\d+)\)/ ? $1 : 0;
+	my $source_type = ($rna_count > $dna_count ? "RNA" : "DNA");
+	my $source = $hash->{'origin'};
+
+	if (! defined $hash->{'div'} || ! defined $hash->{'gi'} || ! defined $hash->{'desc'} || ! defined $hash->{'taxid'})
+	{
+		print STDERR "ERROR: No result found for $hash->{'seqid'}\n";
+		exit(1);
+	}
+
+	# source translations
+	$source = "Nasopharyngeal aspirates" if ($source eq "mucus");
+
+	#my $organism = $hash->{'desc'}; $organism =~ s/[\[\]]//g; $organism =~ s/Full=/ /g; $organism =~ s/=/ /g; $organism =~ s/\s+/ /g; $organism = "taxid:$hash->{'taxid'} $organism";
+	my $organism = get_organism_from_taxonomy_division($hash->{'div'}, $source);
+
+	
+	my $seq_type = $hash->{'nreads'} > 1 ? "contig $hash->{'nreads'} reads" : "single-read";
+	print ">$id [clone=$sample_type-$hash->{'iid'} $seq_type][isolation_source=$source ($source_type)][organism=$organism][host=$host][country=$country]\n";
+}
+
+sub get_organism_from_taxonomy_division
+{
+	my %div_lookup = (
+		"BCT" => "uncultured bacterium", 
+		#"PLN" => "uncultured plant",
+		"ENV" => "uncultured environmental sample",
+		"PHG" => "uncultured phage",
+		#"ENV" => "environmental sample"
+	);
+	my $div = shift, my $source = lc(shift);
+	return defined $div_lookup{$div} ? "$div_lookup{$div} from $source" : "uncultured organism from $source";
+}

@@ -1,0 +1,74 @@
+#!/usr/bin/perl -w
+
+use strict;
+use File::Basename;
+
+my @sff_files = @ARGV;
+
+my $codes = {
+	'ACGAGTGCGT' => ['Psoriasis', 'DNA MID1'],
+	'ACGCTCGACA' => ['Psoriasis', 'RNA MID2'],
+	'AGCACTGTAG' => ['Parvolik',  'DNA MID3'],
+	'ATCAGACACG' => ['Parvolik',  'RNA MID4'],
+};
+
+# get all code-key lengths in a desc sorted list
+my $clength;
+{
+	my %l; $l{length $_} = 1 foreach (keys %$codes);
+	$clength = [sort {$b <=> $a} (keys %l)];
+}
+
+# process all supplied SFF files
+foreach my $file (@sff_files)
+{
+	die("ERROR: Supplied $file does not exists or can not be opened!\n") if (! -f $file);
+
+	print STDERR "INFO: Reading $file\n";
+
+	my $filters = {};
+	my $k, my $d;
+	open(PROC, "sffinfo -s $file |") || die("ERROR: Unable to open $file through the sffinfo pipe");
+	while (<PROC>)
+	{
+		if ( m/^>(\S+)/)
+		{
+			my $kk = $1;
+			handle($k, $d, $codes, $clength, $filters) if (defined $k && defined $d);
+			$k = $kk; undef $d;
+		}
+		else
+		{
+			chomp;
+			$d .= $_;
+		}
+	}
+	handle($k, $d, $codes, $clength, $filters) if (defined $k && defined $d);
+	close(PROC);
+
+	foreach my $key (keys %$filters)
+	{
+		my $fname = basename($file, '.sff') . '.' . lc($key) . '.filter';
+		open(O, ">$fname") || die("ERROR: Unable to open $fname for output!\n");
+		print O "$_\n" foreach (@{$$filters{$key}});
+		close(O);
+	
+		print STDERR "INFO: " . (scalar @{$$filters{$key}}) . " entries successfully written to $fname\n";
+	}
+}
+
+
+
+sub handle
+{
+		my ($k, $d, $codes, $clength, $filters) = @_;
+		my $dl = length $d;
+
+		my $key; my $key_seq = substr($d, 0, $$clength[0] < $dl ? $$clength[0] : $dl- 1);
+		for (my $i = 0; $i <= $#$clength && ! defined $key; ++$i)
+		{
+			$key = $$codes{substr($d, 0, $$clength[$i])} if ($dl > $$clength[$i]);
+		}
+		$key = ['unknown', "$key_seq"] if (! defined $key);
+		push(@{$$filters{$$key[0]}}, "$k $$key[1]");
+}

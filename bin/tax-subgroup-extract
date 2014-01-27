@@ -1,0 +1,67 @@
+#!/usr/bin/perl -w
+
+use strict;
+use File::Basename;
+
+my $fasta = shift;
+my $nodes = shift;
+my $out_file = shift;
+
+if (!defined $fasta || ! defined $nodes)
+{
+	print STDERR "Please supply both a FASTA file and a taxonomy nodes file!\n";
+	exit 10;
+}
+
+# read nodes
+my $name, my %nodes;
+open(FILE, $nodes) || die("ERROR: Unable to open $nodes for input!\n");
+while (<FILE>)
+{
+	if ( m/^>(\S+)/ )
+	{
+		if (defined $name)
+		{
+			print "WARN: Multiple groups in taxonomy file, only the first group read!\n";
+			last;
+		}
+		$name = $1;
+	}
+	elsif ( m/^(\d+)/)
+	{
+		$nodes{$1} = 1;
+		$name = "unknown" if (! defined $name);
+	}
+}
+close(FILE);
+
+if (! defined $name)
+{
+	print STDERR "No information found in $nodes file!\n";
+	exit 4;
+}
+
+if (! defined $out_file)
+{
+	my $base = $fasta, my $ext = "";
+	if ($fasta =~ m/^(.+)\.([^.]+)$/ )
+	{
+		$base = $1; $ext = $2;
+	}
+	$out_file = "$base.$name.$ext";
+}
+
+print "Extracting subgroup \"$name\" from $fasta, storing result in $out_file!\n";
+open(FILE, "<", $fasta) || die("ERROR: Unable to open $fasta for input!\n");
+open(OUT, ">", $out_file) || die("ERROR: Unable to open $out_file for output!\n");
+my $w = 0;
+while (<FILE>)
+{
+	$w = defined $nodes{$1} if ( m/^>.+?dt\|\w{3}\.(\d+)/);
+	print OUT if ($w);
+}
+close(FILE);
+close(OUT);
+
+
+

@@ -1,0 +1,135 @@
+#!/usr/bin/perl
+
+use strict;
+
+if (scalar @ARGV < 1)
+{
+	print "Supply a file of nodes as a command line argument.\n";
+	exit(10);
+}
+
+my $base_nodes = $ARGV[0];
+my $base_nodes_name = $base_nodes =~ /^(.+)\.nodes(\.txt)?$/ ? $1 : ($base_nodes =~/^([^.]+)/ ?  $1 : $base_nodes);
+my $out_file = (defined $ARGV[1])? $ARGV[1] : "$base_nodes_name.out";
+my $nodes = (defined $ARGV[2])? $ARGV[2] : "nodes.dmp";
+my $names = (defined $ARGV[3])? $ARGV[3] : "names.dmp";
+
+my $started = `date +'%Y-%m-%d %H:%M:%S'`; chomp $started;
+print "INFO: started=$started, in=$base_nodes, out=$out_file\n";
+
+# reading base nodes of interest
+my %base_nodes;
+
+open(FILE, "<$base_nodes") || die("ERROR: Unable to open $base_nodes for input.\n");
+print "INFO: Reading base nodes of which sub nodes should be extracted from $base_nodes.\n";
+while (<FILE>)
+{
+	if ( m/^(\d+)\s*#?\s*(.+)?/ )
+	{
+		$base_nodes{$1} = 1;
+		print " reading node: $1" . ($1 ne $+ ? "\t- $+\n" : "\n") ;
+	}
+}
+close(FILE);
+
+my %sub_nodes;
+my %node_lookup;
+open(FILE, "<$nodes") || die("ERROR: Unable to open $nodes for input.\n");
+print "INFO: Reading subnodes from $nodes which have a parent node in read base nodes.\n";
+while (my $line = <FILE>)
+{
+	my @cols = split(/\s*\|\s*/, $line);
+	if (defined $cols[1] && defined $base_nodes{$cols[1]})
+	{
+		my $tax_id = $cols[0];
+		if (! defined $base_nodes{$tax_id})
+		{
+			$sub_nodes{$tax_id} = ();
+			$node_lookup{$tax_id} = $tax_id;
+		}
+	} 
+}
+close(FILE);
+
+my $found = 1;
+while ($found != 0)
+{
+	$found = 0;
+	open(FILE, "<$nodes") || die("ERROR: Unable to open $nodes for input.\n");
+	print "INFO: Re-read $nodes to search for members of each sub node branch";
+	while (my $line = <FILE>)
+	{
+		my @cols = split(/\s*\|\s*/, $line);
+		if (defined $cols[1] && defined $node_lookup{$cols[1]})
+		{
+			my $tax_id = $cols[0];
+			if (! defined $node_lookup{$tax_id})
+			{
+				$node_lookup{$tax_id} = $node_lookup{$cols[1]};
+				++$found;
+			}
+		} 
+	}
+	close(FILE);
+
+	print ", $found new members found.\n";
+}
+#copy all nodes to sub_nodes
+foreach my $key (keys %node_lookup)
+{
+	my $tax_id = $node_lookup{$key};
+	if ( ! defined $sub_nodes{$tax_id}{'members'})
+	{
+		$sub_nodes{$tax_id}{'members'} = [];
+	}
+	push(@{$sub_nodes{$tax_id}{'members'}}, $key);
+}
+
+
+my %name_type_rank = (
+	"scientific name" => 0, 
+	"genbank common name" => 1, 
+	"common name" => 2, 
+	"synonym" => 3
+);
+
+open(FILE, "<$names") || die("ERROR: Unable to open $names for input.\n");
+print "INFO: Reading taxonomy names for extracted sub nodes from $names.\n";
+while (my $line = <FILE>)
+{
+	my ($taxid, $name, $ownname, $nametype) = split(/\s*\|\s*/, $line);
+	if (defined $sub_nodes{$taxid})
+	{
+		my $rank = defined $name_type_rank{$nametype} ? $name_type_rank{$nametype} : 100;
+		if (! defined $sub_nodes{$taxid}{'namerank'} || $rank < $sub_nodes{$taxid}{'namerank'})
+		{
+			$sub_nodes{$taxid}{'name'} = $name;
+			$sub_nodes{$taxid}{'namerank'} = $rank;
+		}
+	}
+}
+close(FILE);
+
+open(OUT, ">$out_file")  || die("ERROR: Unable to open $out_file for output.\n");
+print "INFO: Writing output to $out_file.\n";
+my $csplits = 0, my $cmembers = 0;
+foreach my $key (keys %sub_nodes)
+{
+	my $name = $sub_nodes{$key}{'name'};
+	$name =~ s/ \(class\)//;
+
+	print OUT "$key\t$name\n";
+	++$csplits;
+	if (defined $sub_nodes{$key}{'members'})
+	{
+		my @members = @{$sub_nodes{$key}{'members'}};
+		foreach my $member (@members)
+		{
+			print OUT ">$member\n";
+			++$cmembers;
+		}
+	}
+}
+close(OUT);
+
+print "DONE: $csplits nodes been written containing a total of $cmembers members!\n";

@@ -1,0 +1,81 @@
+#!/usr/bin/perl -w
+
+use strict;
+
+if (scalar @ARGV < 2)
+{
+	print STDERR "Please supply a from pattern and an optional base node!\n";
+	exit;
+}
+
+my $from = shift;
+my $base = shift; $base = 1 if (! defined $base);
+
+
+print STDERR "INFO: Loading nodes\n";
+
+my %nodes;
+open(FILE, "nodes.dmp");
+while (<FILE>)
+{
+	my ($taxid, $parent_id, $rank) = split(/\s*\|\s*/);
+	$nodes{$taxid} = {"parent" => $parent_id, "rank" => $rank, "children" => [] };
+	push(@{$nodes{$parent_id}{"children"}}, $taxid) if (defined $nodes{$parent_id});
+}
+close(FILE);
+
+my %result = ($base => 1);
+
+print STDERR "INFO: Find result nodes through recursive iteration of nodes tree!\n";
+iterate_nodes($nodes{$base}, $from, \%nodes, \%result);
+
+sub iterate_nodes
+{
+	my $base = shift, my $from = shift, my $nodes = shift, my $result = shift;
+
+	# iterate children
+	foreach my $child_tax_id (@{$base->{"children"}})
+	{
+		my $child = $nodes->{$child_tax_id};
+		if ($child->{"rank"} =~ m/$from/)
+		{
+			$result{$child_tax_id} = 1;
+			my $p = $child->{"parent"};
+			while (! defined $result->{$p})
+			{
+				$result->{$p} = 1;
+				$p = $nodes->{$p}{"parent"};
+			}
+		}
+		# recurse through child-nodes
+		iterate_nodes($child, $from, $nodes, $result);
+	}
+}
+
+print STDERR "INFO: Loading names for nodes!\n";
+
+my %name_type_rank = (
+	"scientific name" => 0, 
+	"genbank common name" => 1, 
+	"common name" => 2, 
+	"synonym" => 3
+);
+
+open(FILE, "names.dmp");
+while (<FILE>)
+{
+	my ($taxid, $name, $ownname, $nametype) = split(/\s*\|\s*/);
+	if (defined $result{$taxid})
+	{
+		my $rank = defined $name_type_rank{$nametype} ? $name_type_rank{$nametype} : 100;
+		if ($result{$taxid} == 1 || $rank < $result{$taxid}{'namerank'})
+		{
+			$result{$taxid} = {'name' => $name, 'namerank' => $rank} ;
+		}
+	}
+}
+close(FILE);
+
+print "#\n# Subnodes from these nodes are extracted and stored\n#\n";
+print "$_\t\t# $result{$_}{'name'}\n" foreach (sort { $a <=> $b } (keys %result))
+

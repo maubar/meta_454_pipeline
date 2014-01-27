@@ -1,0 +1,391 @@
+#!/usr/bin/perl -w
+
+use strict;
+use Math::Trig;
+
+#
+#settings
+#
+
+my $write_region_headers = 1;					# write region headers in output
+my $new_region_ethres = 0.01; 				# do not report a new hit region if the best e-value is above this value
+my $category_report_min_weight = 0.01;		# do not report a category with less weight that this
+my $region_max_results = 25;					# maximum hits to report for each region
+my $region_result_fillup_sthres = 0.30;	# fill-up result list for each region to max unless the hit is less than this of the best hit
+my $best_is_env_next_thres = 0.85;			# if the best hit is environmental, do not include if a non-env hit is found with a score which is at least this of the best hit
+
+
+
+#
+# read entries from pipe or file
+#
+my $h, my $d;
+while (<>)
+{
+	chomp;
+	if ( m/^>/)
+	{
+		analyze($h, $d) if (defined $h && defined $d);
+		$h = $_; undef $d; 
+		next;
+	}
+	push(@$d, $_);
+}
+analyze($h, $d) if (defined $h && defined $d);
+
+# all done
+exit(0);
+
+
+
+
+
+
+#
+# functions
+#
+
+
+# main sub, analyzes the results of a single query sequence
+sub analyze
+{
+	my $h = shift, my $d = shift;
+
+	#
+	# parse results into array
+	#
+	my @pr;
+	foreach (@$d)
+	{
+		if ( m/(\w):#([^#]+)#>(.+)/ )
+		{
+			my ($type, $hit_nfo, $subj) = ($1, $2, $3);
+			my %hi; foreach (split(",", $hit_nfo)) { $hi{$1} = $2 if ( m/([^=]+)=(.+)/); }
+			$hi{'e'} = "1$hi{'e'}" if ($hi{'e'} =~ m/^e/);
+			push(@pr, [$type, $subj, \%hi]);
+		}
+	}
+
+	#
+	# join BLASTx-results
+	#
+	for (0..$#pr-1)
+	{
+		next if (scalar @{$pr[$_]} == 0);
+		my ($ttype, $tsubj, $thi) = @{$pr[$_]};
+		my ($ntype, $nsubj, $nhi) = @{$pr[$_+1]};
+
+		if ($ttype eq "x" && $ttype eq $ntype && $thi->{'e'} ==  $nhi->{'e'} && $tsubj eq $nsubj)
+		{
+			push(@{$pr[$_]}, $nhi);
+			$pr[$_+1] = [];
+		}
+
+	}
+	# clean collection
+	{ my @tmp; foreach (@pr) { push(@tmp, $_) if (scalar @$_ > 0); } @pr = @tmp; }
+
+
+	#
+	# find hit-regions
+	#
+	my @sr = sort
+	{
+		# sort by score, if exceptionally score is equal place SYN/ENV/UNK last
+		$b->[2]{'s'} <=> $a->[2]{'s'} ||
+		get_div_priority($a->[1] =~ m/dt\|([A-Z]{3})/ ? $1 : undef) <=> get_div_priority($b->[1] =~ m/dt\|([A-Z]{3})/ ? $1 : undef);
+	} (@pr);
+	#print_r($_) foreach (@sr); die;
+
+	my @regions; 
+	foreach my $r (@sr)
+	{
+		last if (scalar @regions && $r->[2]{'e'} > $new_region_ethres);
+		my ($qf, $qt) = get_hit_range($r);
+		# add to regions if not overlapping a previous region
+		my ($ri, $ro) = get_region_max_overlap(\@regions, $qf, $qt);
+		push(@regions, [$qf, $qt]) if ($ri == -1);
+	}
+
+	#
+	# order results into hit-regions
+	#
+	my @rr; 
+	foreach my $r (@sr)
+	{
+		my ($qf, $qt) = get_hit_range($r);
+		my ($ri, $ro) = get_region_max_overlap(\@regions, $qf, $qt);
+		push(@{$rr[$ri]}, $r) if ($ri != -1);
+	}
+
+	#
+	# analyze hit-regions
+	#
+	my @rh; my %scw;
+	for (0..$#rr)
+	{
+		# iterate hit to regions and place results into category results
+		my %category; my $best_s;
+		foreach my $r (@{$rr[$_]})
+		{
+			my ($type, $subj, $hi) = @$r;
+			my $cat = get_category($subj);
+			$best_s = $hi->{'s'} if (! defined $best_s);
+			push(@{$category{$cat}}, $r);
+		}
+
+		# consider best of each category and store the category it's respective weight
+		my @cat = sort { 
+			$category{$b}->[0][2]{'s'} <=> $category{$a}->[0][2]{'s'} ||
+			get_div_priority($category{$a}->[0][1] =~ m/dt\|([A-Z]{3})/ ? $1 : undef) <=> get_div_priority($category{$b}->[0][1] =~ m/dt\|([A-Z]{3})/ ? $1 : undef);
+		} (keys %category);
+		my @cw; my $wsum = 0;
+		for my $cid (0..$#cat)
+		{
+			my $cat = $cat[$cid];
+			next if ($cat eq "U"); # no need to count results which can not be catagorized (most likely missing taxonomy information)
+
+			my $s = $category{$cat}->[0][2]{'s'};
+
+			# check for env category, do not include if not important
+			if ($cat eq "E")
+			{
+				next if ($cid != 0); #env is not the best scoring category in region
+				# find next best scoring non-env category (next category)
+				my $best_non_e = $#cat ? $category{$cat[$cid+1]}->[0][2]{'s'} : 0;
+				next if ($best_non_e >= $best_is_env_next_thres * $s);
+			}
+
+			my $w = get_category_weight($s, $best_s);
+			push(@cw, [$cat[$cid], $w]); $wsum += $w;
+		}
+		$cw[$_][1] /= $wsum for (0..$#cw);
+
+		# calculate region weight, compared to other regions
+		my $rw = get_category_weight($best_s, $sr[0][2]{'s'}); #$sr[0] is the highest scoring hit found
+
+		# calculate region information based on calculated weight and store to sequence category weights
+		my @ri;
+		for (0..$#cw)
+		{
+			# add to region information
+			push(@ri, $cw[$_]) if ($cw[$_][1] >= $category_report_min_weight);
+			
+			# also add to sequence cateogory weight (weighted by region weight)
+			$scw{$cw[$_][0]} += $rw * $cw[$_][1];
+		}
+		push(@rh, \@ri);
+
+
+		# produce a list of most interesting results for region
+		my @results;
+		{
+			# add one result for each category reaching at least $category_report_min_weight
+			for my $cid (0..$#cat)
+			{
+				my $s = $category{$cat[$cid]}->[0][2]{'s'};
+				my $w = get_category_weight($s, $best_s);
+				push(@results, $category{$cat[$cid]}->[0]) if ($w >= $category_report_min_weight);
+			}
+
+			# add to results to fill up with best results if at least $region_result_fillup_sthres of best scoring region hit
+			my @i = ((1) x scalar @cat);
+			my $thres = $best_s * $region_result_fillup_sthres;
+			while (scalar @results < $region_max_results)
+			{
+				my $mid = -1, my $ms = $thres;
+				for (0..$#cat)
+				{
+					my $s = defined $category{$cat[$_]}->[$i[$_]] ? $category{$cat[$_]}->[$i[$_]][2]{'s'} : 0;
+					if ($s > $ms) { $mid = $_; $ms = $s; }
+				}
+				last if ($mid == -1); #none found better than required to report
+
+				push(@results, $category{$cat[$mid]}->[$i[$mid]]);
+				++$i[$mid];
+			}
+			# sort result in score desc order
+			@results = sort 
+			{
+				$b->[2]{'s'} <=> $a->[2]{'s'} ||
+				get_div_priority($a->[1] =~ m/dt\|([A-Z]{3})/ ? $1 : undef) <=> get_div_priority($b->[1] =~ m/dt\|([A-Z]{3})/ ? $1 : undef);
+			} (@results);
+		}
+		$rr[$_] = \@results;
+	}
+
+
+	#
+	# calulate sequence category information
+	#
+	
+	my @si;
+	my $scw_sum = 0; $scw_sum += $_ foreach (values %scw); # get sum to produce normalized category weights
+	foreach (keys %scw)	
+	{
+		my $w = $scw{$_} / $scw_sum;
+		push(@si, [$_, $w]) if ($w >= $category_report_min_weight);		
+
+	}
+	@si = sort { $b->[1] <=> $a->[1] } (@si);
+	
+
+	#
+	# output results
+	#
+
+	# print header	
+	my @sc; push(@sc, sprintf("%s(%.1f)", $_->[0], 100 * $_->[1])) for (@si);
+	my $qlen = $h =~ m/length=(\d+)/ ? $1 : undef;
+	my $rtotsize = 0; $rtotsize += $_->[1] - $_->[0] + 1 foreach (@regions);
+	print "$h cat=" . (scalar @sc ? join(",", @sc) : "U(100.0)");
+	printf(" hcov=%.1f%%", 100 * $rtotsize / $qlen) if (defined $qlen);
+	print "\n";
+
+	# print results for regions
+	for (0..$#rr)
+	{
+		my $ri = $rh[$_];
+		if ($write_region_headers && scalar @rr > 1)
+		{
+			printf "#region=%d", $_ + 1;
+			printf(" %s=%.1f", $_->[0], 100 * $_->[1]) for (@$ri);
+			print "\n";
+		}
+		print_r($_) foreach (@{$rr[$_]});
+	}
+	
+	# end by a separating newline
+	print "\n";
+}
+
+# guess a category given the subj
+sub get_category
+{
+	my $subj = shift;
+	my ($div, $taxid) = ($1, $2) if ($subj =~ m/dt\|(\w{3})\.(\d+)/);
+	return "U" if (! defined $div);
+	return "P" if ($div eq "PHG"); #  || (($div eq "BCT" || $div eq "VRL" || $div eq "ENV") && $subj =~ m/phage/i)
+	return "M" if ($div eq "MAM" || $div eq "PRI" || $div eq "ROD");
+	return "B" if ($div eq "BCT" || ($div eq "ENV" && $subj =~ m/bacteri/i));
+	return "E" if ($div eq "ENV" || $div eq "SYN" || $div eq "UNA");
+	return "V" if ($div eq "VRL");
+	return "U" if ($div eq "UNK");
+	return "O";
+}
+
+# print parsed result
+sub print_r
+{
+	my $r = shift;
+	my ($type, $subj, $hi) = @$r;
+	print "$type:#";
+	my @v; 	
+
+	# one HSP
+	if (scalar @$r == 3)
+	{
+		push(@v, "$_=$hi->{$_}") foreach ( qw(e s id cov qhit dhit sense) );
+	}
+	# multi HSP hit (splitted blastx hit)
+	else
+	{
+		push(@v, "$_=$hi->{$_}") foreach( qw(e) );
+		push(@v, "parts=" . scalar @$r - 2);
+
+		foreach my $v ( qw(s id cov qhit dhit) )
+		{
+			my @parts; push(@parts, "$r->[$_]{$v}") for (2..$#$r);
+			push(@v, "$v=" . join("+", @parts));
+		}
+
+		push(@v, "$_=$hi->{$_}") foreach( qw(sense) );
+	}
+
+	print join(",", @v);
+	print "#>$subj\n";
+}
+
+# get hit range (defaults to query hit)
+sub get_hit_range
+{
+	my $r = shift, my $key = defined $_[0] ? shift : "qhit";
+	my $mf = 10000000, my $mt = 0;
+
+	# iterate potential multiple results from join BLASTx results
+	for (2..$#$r)
+	{
+		my ($f, $t) = ($1, $2) if ($r->[$_]{$key} =~ m/(\d+)..(\d+)/);
+		$mf = min($f, $mf);
+		$mt   = max($t, $mt);
+	}
+	return ($mf, $mt);
+}
+
+# get region max overlap
+sub get_region_max_overlap
+{
+	my $regions = shift, my $qfrom = shift, my $qto = shift;
+	my $mo = 0, my $mi = -1;
+	for (0..$#$regions)
+	{
+		my ($f, $t) = @{$regions->[$_]};
+		if ($qto > $f && $qfrom < $t)
+		{
+			my $o = min($qto, $t) - max($qfrom, $f);
+			if ($o > $mo) { $mo = $o; $mi = $_;	}
+		}
+	}
+	return ($mi, $mo);
+}
+
+# simple max/min function
+sub max { return $_[0] > $_[1] ? $_[0] : $_[1]; }
+sub min { return $_[0] < $_[1] ? $_[0] : $_[1]; }
+
+# get a category weight based on how big a part score is of the maximum score
+sub get_category_weight
+{
+	my $tipp = 0.85, my $multi = 12; my $max = 1+tanh((1.0-$tipp)*$multi);
+	my ($s, $best_s) = @_;
+	return (1+tanh((($s/$best_s)-$tipp)*$multi))/$max;
+
+	#my ($s, $best_s) = @_;
+	#return 1-erf(3.14159265*($best_s - $s)/$best_s);
+}
+
+sub get_div_priority
+{
+	my $div = shift;
+	return 11 if (! defined $div || $div eq "UNK");
+	return 10 if ($div eq "ENV" || $div eq "SYN");
+	return 0;
+}
+
+
+
+# error function approx (decalred to ride perl of cpan ERF dependency)
+sub erf
+{
+	my $x = shift; 
+	return 0 if ($x == 0);
+
+	# constants
+	my $a1 =  0.254829592;
+	my $a2 = -0.284496736;
+	my $a3 =  1.421413741;
+	my $a4 = -1.453152027;
+	my $a5 =  1.061405429;
+	my $p  =  0.3275911;
+
+	# Save the sign of x
+	my $sign = ($x < 0)? -1 : 1;
+	$x = abs($x);
+
+	# A & S 7.1.26
+	my $t = 1.0/(1.0 + $p*$x);
+	my $y = 1.0 - ((((($a5*$t + $a4)*$t) + $a3)*$t + $a2)*$t + $a1)*$t*exp(-$x*$x);
+	return $sign*$y;
+}
+
+
