@@ -1,0 +1,17 @@
+#
+# Subnodes from these nodes are extracted and stored
+#
+10239		# virus base node
+35237		# dsDNA viruses, no RNA stage
+35325		# dsRNA viruses
+35268		# Retro-transcribing viruses
+29258		# ssDNA viruses
+439488	# ssRNA viruses
+35301		# ssRNA negative-strand viruses
+11157		# Mononegavirales
+35278		# ssRNA positive-strand viruses, no DNA stage
+11158		# Paramyxoviridae
+11159		# Paramyxovirinae
+464095	# Picornavirales
+
+#12128	# Enterovirus, a Picornaviridae (contain Rhinovirus, Coxsackie, Entero)

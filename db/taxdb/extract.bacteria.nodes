@@ -1,0 +1,11 @@
+#
+# Subnodes from these nodes are extracted and stored
+#
+2			# Bacteria (Kingdom)
+201174	# Actinobacteria
+1760		# Actinobacteria (Class)
+68336		# Bacteroidetes/Chlorobi group
+51290		# Chlamydiae/Verrucomicrobia group
+131550	# Fibrobacteres/Acidobacteria group
+1239		# Firmicutes
+1224		# Proteobacteria
