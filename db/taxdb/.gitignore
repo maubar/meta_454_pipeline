@@ -1,0 +1,16 @@
+#Ignore everything
+*
+#Except this file
+!.gitignore
+!download
+!extract
+!extract.bacteria.nodes
+!extract.viridae.nodes
+!extract.virus-enterovirus.nodes
+!extract.virus-flaviviridae.nodes
+!extract.virus-influenza.a.virus.nodes
+!extract.virus.nodes
+!extract.virus.orthomyxoviridae.nodes
+!generate-nodes
+!generate-out
+!gi2tax
