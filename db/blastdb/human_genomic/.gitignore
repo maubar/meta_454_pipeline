@@ -1,0 +1,7 @@
+#Ignore
+*
+#Include
+!.gitignore
+!download
+!download_old_from_fasta
+!fasta/
