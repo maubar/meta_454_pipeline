@@ -1,5 +1,10 @@
 #!/usr/bin/perl
 
+# Processes the taxid's in the *.nodes file, and creates an *.out file which
+# contains the taxid and name of the children nodes for each given taxid.
+# Also for each of the children nodes it lists he taxid of all the existing
+# species(leaf nodes in the tax tree) that belong to it
+
 use strict;
 
 if (scalar @ARGV < 1)
@@ -17,13 +22,14 @@ my $names = (defined $ARGV[3])? $ARGV[3] : "names.dmp";
 my $started = `date +'%Y-%m-%d %H:%M:%S'`; chomp $started;
 print "INFO: started=$started, in=$base_nodes, out=$out_file\n";
 
-# reading base nodes of interest
+# Reading base nodes to expand from the *.nodes file
 my %base_nodes;
 
 open(FILE, "<$base_nodes") || die("ERROR: Unable to open $base_nodes for input.\n");
 print "INFO: Reading base nodes of which sub nodes should be extracted from $base_nodes.\n";
 while (<FILE>)
 {
+	#Lines expected to be of the form: taxid \t #tax_name
 	if ( m/^(\d+)\s*#?\s*(.+)?/ )
 	{
 		$base_nodes{$1} = 1;
@@ -32,10 +38,12 @@ while (<FILE>)
 }
 close(FILE);
 
-my %sub_nodes;
-my %node_lookup;
+#Extract children nodes from each of the input base nodes
+
+my %sub_nodes; #Stores the taxids of the species (leaf nodes) that belong to the children of the base nodes
+my %node_lookup; #Keeps track of which sub category does the leaf-node belong to
 open(FILE, "<$nodes") || die("ERROR: Unable to open $nodes for input.\n");
-print "INFO: Reading subnodes from $nodes which have a parent node in read base nodes.\n";
+print "INFO: Extracting children nodes of each base node from $nodes\n";
 while (my $line = <FILE>)
 {
 	my @cols = split(/\s*\|\s*/, $line);
@@ -51,6 +59,8 @@ while (my $line = <FILE>)
 }
 close(FILE);
 
+#Repeatedly iterate through nodes.dmp file, doing a breadth-first expansion of each of the
+#subtrees whose root node is a child of the base nodes
 my $found = 1;
 while ($found != 0)
 {
