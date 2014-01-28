@@ -19,8 +19,6 @@ if (! defined $file_fasta || ! -f $file_fasta)
 }
 my $db_blast = "db/blastdb";
 my $db_taxonomy = "db/taxdb";
-my $binary_blastall = "blastall";
-my $binary_megablast = "megablast";
 
 my $single_file_output_count = 10;
 my $consed_file_output_count_from_single = 3;
@@ -33,29 +31,35 @@ my $preclassify_cov_threshold = 70;
 
 my $eval_score_xn_ratio = 0.75;	# eval x score or n score, eval x if at least $eval_score_xn_ratio of n
 
+#General blast(n|p|x) params
+my $blast_eval = 10;			# e-value threshold for result-reporting
+my $blast_max_target_seqs = 10;		# amount of results to report
+my $blast_outfmt = 5;			# Alignment view format (5 = XML, 6 = table w/o comments)
+#-show_gis  includes the NCBI gi identifiers in the matches
 
-my $blaste = 10;			# e-value threshold for result-reporting
-my $blastrc = 10;			# amount of results to report
-my $mblastr = 2;			# megablast reward for match
-my $mblastq = -3;			# megablast penalty for miss-match
-my $mblastG = 5;			# megablast gap opening penalty
-my $mblastE = 2;			# megablast gap extension penalty
-my $blastnr = 4;			# blastn reward for match
-my $blastnq = -5;			# blastn penalty for miss-match
-my $blastnG = 12;			# blastn gap opening penalty
-my $blastnE = 8;			# blastn  gap extension penalty
+#Megablast params
+my $megab_match = 2;			# match score
+my $megab_mismatch = -3;		# mismatch score
+my $megab_gapopen = 5;			# gap opening penalty
+my $megab_gapext = 2;			# gap extension penalty
 
-# m == output format (XML), I == GIs in deflines, F = repeat filtering
-my $blastparams_all = "-e$blaste -a$cpu_count -v$blastrc -b$blastrc -m7 -IT -FF"; 
+#Blastn params
+my $blastn_match = 4;			# Match score
+my $blastn_mismatch = -5;		# Mismatch score
+my $blastn_gapopen = 12;		# gap opening penalty
+my $blastn_gapext = 8;			# gap extension penalty
+
+
+my $blastparams_all = "-evalue $blast_eval -num_threads $cpu_count -max_target_seqs $blast_max_target_seqs -out_fmt $blast_outfmt -show_gis"; 
 my %blastparams = (
-	"megablast" => "$blastparams_all -r$mblastr -q$mblastq -G$mblastG -E$mblastE", 
-	"blastn" => "$blastparams_all -r$blastnr -q$blastnq -G$blastnG -E$blastnE",
+	"megablast" => "$blastparams_all -reward $megab_match -penalty $megab_mismatch -gapopen $megab_gapopen -gapextend $megab_gapext", 
+	"blastn" => "$blastparams_all -reward $blastn_match -penalty $megab_mismatch -gapopen $blastn_gapopen -gapextend $blastn_gapext",
 	"blastx" => "$blastparams_all"
 );
 my %blastbinaries = (
-	"megablast" => $binary_megablast, 
-	"blastn" => "$binary_blastall -pblastn",
-	"blastx" => "$binary_blastall -pblastx"
+	"megablast" => "blastn -task megablast", 
+	"blastn" => "blastn -task blastn",
+	"blastx" => "blastx"
 );
 
 
@@ -546,7 +550,7 @@ sub run_step
 		my $file_smapout = "$folder_result_run/$file_base.$dbname.$dbpart.$blasttype.smap";
 		my $file_blastoutwarn = "$folder_result_run/$file_base.$dbname.$dbpart.$blasttype.warn";
 
-		$ln = $blastbinaries{$blasttype} . " -i$folder_result_run/$file_base.fasta -d$dbfolder/$dbname.$dbpart " . $blastparams{$blasttype};
+		$ln = $blastbinaries{$blasttype} . " -query $folder_result_run/$file_base.fasta -db $dbfolder/$dbname.$dbpart " . $blastparams{$blasttype};
 		print " $ln\n";
 
 		my $apcount = (-f $file_shortout && -f $file_smapout ) ? int(`grep -c '^>' $file_shortout`) : 0;
