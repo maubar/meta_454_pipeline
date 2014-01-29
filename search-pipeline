@@ -50,7 +50,7 @@ my $blastn_gapopen = 12;		# gap opening penalty
 my $blastn_gapext = 8;			# gap extension penalty
 
 
-my $blastparams_all = "-evalue $blast_eval -num_threads $cpu_count -max_target_seqs $blast_max_target_seqs -out_fmt $blast_outfmt -show_gis"; 
+my $blastparams_all = "-evalue $blast_eval -num_threads $cpu_count -max_target_seqs $blast_max_target_seqs -outfmt $blast_outfmt -show_gis"; 
 my %blastparams = (
 	"megablast" => "$blastparams_all -reward $megab_match -penalty $megab_mismatch -gapopen $megab_gapopen -gapextend $megab_gapext", 
 	"blastn" => "$blastparams_all -reward $blastn_match -penalty $megab_mismatch -gapopen $blastn_gapopen -gapextend $blastn_gapext",

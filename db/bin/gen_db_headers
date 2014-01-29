@@ -67,7 +67,8 @@ exit(0);
 sub flush_entries
 {
 	my $entries = shift;
-	my $gi_file = "/tmp/gdh.gi2tax." . (time % 997) . "$$.gi"; open(O, ">$gi_file") || die("ERROR: Unable to open $gi_file for output!\n");
+	my $gi_file = "/tmp/gdh.gi2tax." . (time % 997) . "$$.gi";
+	open(O, ">$gi_file") || die("ERROR: Unable to open $gi_file for output!\n");
 	print O "$_->[0]\n" foreach (@$entries);
 	close(O);
 
