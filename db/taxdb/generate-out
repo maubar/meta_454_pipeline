@@ -1,5 +1,7 @@
 #!/usr/bin/perl -w
 
+#Given a base node taxid find all the descendants of the type of the indicated tax hierarchy (kingdom, phylum, ... species) 
+
 use strict;
 
 if (scalar @ARGV < 2)
