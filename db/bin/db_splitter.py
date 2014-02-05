@@ -18,21 +18,21 @@ def main():
     
     db_name = "nr"
     
-    seq_label_file = "../../db_headers/nr_headers"
-    seq_labels_fh = open(seq_label_file)
+    seq_label_file = sys.argv[1]
+    label_to_keep = sys.argv[2]
     
     
     #NCBI taxonomy db division categories are 12
     # BCT, INV, MAM, PHG, PLN, PRI, ROD,SYN, UNA, VRL, VRT, ENV
-    #output_categories = ["MAM", "BCT", "VRL", "OTR"]
+    # custom categories  = ["MAM", "BCT", "VRL", "OTR"]
     
-    db_to_output_category_map = {   "MAM": "MAM", "ROD":"MAM", "PRI":"MAM",
-                                    "BCT": "BCT",
-                                    "PHG": "VRL", "VRL":"VRL",
-                                    "INV": "OTR","PLN":"OTR", "SYN": "OTR", "UNA":"OTR", "VRT":"OTR", "ENV": "OTR" 
+    ncbi_to_custom_label_map = {   "MAM": "MAM", "ROD":"MAM", "PRI":"MAM",
+                                   "BCT": "BCT",
+                                   "PHG": "VRL", "VRL":"VRL",
+                                   "INV": "OTR","PLN":"OTR", "SYN": "OTR","VRT":"OTR", "ENV": "OTR",
+                                   "UNK": "OTR", "UNA":"OTR","UND":"OTR" #Undefined hits
                                  }
     #PARAMS
-    label_to_keep = "MAM"
     
     labels_in_memory = 10000 #how many labels to bulk load from the header file
     fasta_lines_in_memory = 10000
@@ -41,14 +41,17 @@ def main():
     #Load 
     nSeqs_processed  = 0
     include_sequence = False
-    
-    label_reader = bulkLoadSequenceLabels(seq_labels_fh,labels_in_memory)
+    fasta_header_regex = re.compile("^>")
+
+    seq_labels_fh = open(seq_label_file)
+    label_reader = bulkLoadSequenceLabels(seq_labels_fh,labels_in_memory, ncbi_to_custom_label_map)
     seq_labels = label_reader.next()
+
     
     for fasta_lines in bulkLoadFasta(db_in, fasta_lines_in_memory):
         for fasta_line in fasta_lines:
             #If fasta sequence header line
-            if re.match(fasta_line,"^>"):
+            if fasta_header_regex.match(fasta_line):
                 include_sequence = belongs_to_category(fasta_line, label_to_keep, seq_labels.popleft() )
                 nSeqs_processed += 1
                 if include_sequence:
@@ -59,8 +62,9 @@ def main():
             else: #If it is nucleotide/aminoacid sequnce
                 if include_sequence:
                     db_out.write(fasta_line)
+
         
-def belong_to_category(fasta_header, label_to_keep,  seq_label ):
+def belongs_to_category(fasta_header, label_to_keep,  seq_label ):
     #Verify if label corresponds to the read header:
     if fasta_header.find(seq_label[0]) > -1:
         return label_to_keep == seq_label[1]
@@ -69,26 +73,28 @@ def belong_to_category(fasta_header, label_to_keep,  seq_label ):
         raise Exception("Fail :(")
 
 #Lazy loading methods!
-def bulkLoadSequenceLabels(label_file ,nLines = 10000):
+def bulkLoadSequenceLabels(label_file ,nLines , ncbi_to_custom_label_map):
     while True:
         data = deque()
         for i in range(nLines):
-            line = dbfile.readline()
+            line = label_file.readline()
             if not line:
                 break
-            #Extract gi and tax. category (cols 0 and 2)
+            #Extract gi and tax division label(cols 0 and 2)
             fields = line.rstrip("\n").split("\t")
-            data.append( (fields[0],fields[2] ) )
+            #Convert from ncbi tax divisions to the pipeline's custom divisions
+            custom_label = ncbi_to_custom_label_map[ fields[2] ]
+            data.append( (fields[0],custom_label ) )
         if not data:
             break
         yield data
         
 
-def bulkLoadFasta(db_file,nLines= 10000):
+def bulkLoadFasta(db_file,nLines):
     while True:
         data = []
         for i in range(nLines):
-            line = dbfile.readline()
+            line = db_file.readline()
             if not line:
                 break
             data.append(line)
