@@ -53,7 +53,7 @@ my $blastn_gapext = 8;			# gap extension penalty
 my $blastparams_all = "-evalue $blast_eval -num_threads $cpu_count -max_target_seqs $blast_max_target_seqs -outfmt $blast_outfmt -show_gis"; 
 my %blastparams = (
 	"megablast" => "$blastparams_all -reward $megab_match -penalty $megab_mismatch -gapopen $megab_gapopen -gapextend $megab_gapext", 
-	"blastn" => "$blastparams_all -reward $blastn_match -penalty $megab_mismatch -gapopen $blastn_gapopen -gapextend $blastn_gapext",
+	"blastn" => "$blastparams_all -reward $blastn_match -penalty $blastn_mismatch -gapopen $blastn_gapopen -gapextend $blastn_gapext",
 	"blastx" => "$blastparams_all"
 );
 my %blastbinaries = (
@@ -1039,17 +1039,17 @@ sub process_join_split_run_results
 
 		analyze_smaps_and_set_header_and_splits($seq, $key, $split_sequence_hash_ref);
 
-		my @sorted_hits = sort 
+		my @sorted_hits = (defined $seq->{'hits'}) ? sort 
 		{
 			my $as = ($a =~ m/s=([\d.]+)[,#]/ ? $1 : 0); 
 			my $bs = ($b =~ m/s=([\d.]+)[,#]/ ? $1 : 0);
 			$bs <=> $as;
 		} 
-		(@{ $seq->{'hits'} });
+		(@{ $seq->{'hits'} }) : ();
 
 		# add to classified if above threshold
 		my $write_classified = 0;
-		if ($#sorted_hits && $sorted_hits[0] =~ m/id=([\d.]+)%.+?,cov=([\d.]+)%/)
+		if ($#sorted_hits > -1 && $sorted_hits[0] =~ m/id=([\d.]+)%.+?,cov=([\d.]+)%/)
 		{
 			$classified_hash_ref->{$key} = $write_classified = 1 if ($1 >= $preclassify_id_threshold && $2 >= $preclassify_cov_threshold);
 		}
