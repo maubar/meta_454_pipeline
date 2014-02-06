@@ -1,0 +1,2 @@
+[BLAST]
+BLASTDB=../blastdb/nr::../blastdb/nt

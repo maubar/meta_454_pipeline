@@ -34,8 +34,8 @@ def main():
                                  }
     #PARAMS
     
-    labels_in_memory = 10000 #how many labels to bulk load from the header file
-    fasta_lines_in_memory = 10000
+    labels_in_memory = 1000000 #how many labels to bulk load from the header file
+    fasta_lines_in_memory = 1000000
     
     
     #Load 

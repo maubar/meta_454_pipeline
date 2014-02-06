@@ -1,0 +1,14 @@
+#!/bin/bash
+
+CAT="MAM"
+blastdbcmd -entry all -ctrl_a  | python ../../bin/db_splitter.py ../../bin/nr_headers $CAT | makeblastdb -title "nr."$CAT -parse_seqids -out ../nr.split/"nr."$CAT -dbtype prot -taxid_map ../../taxdb/gi_taxid_prot.dmp 2> $CAT".log"
+
+CAT="BCT"
+blastdbcmd -entry all -ctrl_a  | python ../../bin/db_splitter.py ../../bin/nr_headers $CAT | makeblastdb -title "nr."$CAT -parse_seqids -out ../nr.split/"nr."$CAT -dbtype prot -taxid_map ../../taxdb/gi_taxid_prot.dmp 2> $CAT".log"
+
+CAT="VRL"
+blastdbcmd -entry all -ctrl_a  | python ../../bin/db_splitter.py ../../bin/nr_headers $CAT | makeblastdb -title "nr."$CAT -parse_seqids -out ../nr.split/"nr."$CAT -dbtype prot -taxid_map ../../taxdb/gi_taxid_prot.dmp 2> $CAT".log"
+
+CAT="OTR"
+blastdbcmd -entry all -ctrl_a  | python ../../bin/db_splitter.py ../../bin/nr_headers $CAT | makeblastdb -title "nr."$CAT -parse_seqids -out ../nr.split/"nr."$CAT -dbtype prot -taxid_map ../../taxdb/gi_taxid_prot.dmp 2> $CAT".log"
+
