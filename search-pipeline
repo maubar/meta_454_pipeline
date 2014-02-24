@@ -259,7 +259,7 @@ open($files{'all'}{'file'}, ">", "$folder_result/$files{'all'}{'name'}") || die(
 foreach (@sequences_keys)
 {
 	my $res = $results{$_};
-	if (defined $res)
+	if (defined $res && defined $res->{'data'})
 	{
 		# split results and create a BLASTx/BLASTn collection
 		my @nd, my @xd;
