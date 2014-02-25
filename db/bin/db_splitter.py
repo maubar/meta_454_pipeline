@@ -41,7 +41,6 @@ def main():
     #Load 
     nSeqs_processed  = 0
     include_sequence = False
-    fasta_header_regex = re.compile("^>")
 
     seq_labels_fh = open(seq_label_file)
     label_reader = bulkLoadSequenceLabels(seq_labels_fh,labels_in_memory, ncbi_to_custom_label_map)
@@ -51,7 +50,7 @@ def main():
     for fasta_lines in bulkLoadFasta(db_in, fasta_lines_in_memory):
         for fasta_line in fasta_lines:
             #If fasta sequence header line
-            if fasta_header_regex.match(fasta_line):
+            if fasta_line.startswith(">"):
                 include_sequence = belongs_to_category(fasta_line, label_to_keep, seq_labels.popleft() )
                 nSeqs_processed += 1
                 if include_sequence:
