@@ -99,7 +99,8 @@ $file_fasta = $file_new_fasta;
 my %steps = (
 	1 => {'type' => 'megablast', 'dbname' => 'nt', 'dbfolder' => "$db_blast/nt.split", "perform-split" => 0}, 
 	2 => {'type' => 'blastn', 'dbname' => 'nt', 'dbfolder' => "$db_blast/nt.split", "perform-split" => 1}, 
-	3 => {'type' => 'blastx', 'dbname' => 'nr', 'dbfolder' => "$db_blast/nr.split", "perform-split" => 0}, 
+	3 => {'type' => 'blastx', 'dbname' => 'swissprot', 'dbfolder' => "$db_blast/swissprot.split", "perform-split" => 0} 
+#	3 => {'type' => 'blastx', 'dbname' => 'nr', 'dbfolder' => "$db_blast/nr.split", "perform-split" => 0}, 
 );
 
 print "INFO: Starting pipeline on $file_fasta_seq_count sequences, writing results into $folder_result\n";

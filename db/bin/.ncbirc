@@ -1,2 +1,2 @@
 [BLAST]
-BLASTDB=../blastdb/nr::../blastdb/nt
+BLASTDB=../blastdb/nr::../blastdb/nt:../blastdb/swissprot

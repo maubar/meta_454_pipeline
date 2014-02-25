@@ -1,0 +1,14 @@
+#!/bin/bash
+
+CAT="MAM"
+blastdbcmd -entry all -ctrl_a -db swissprot -dbtype prot | python ../../bin/db_splitter.py ../../bin/swissprot.headers $CAT | makeblastdb -title "swissprot."$CAT -parse_seqids -out ../swissprot.split/"swissprot."$CAT -dbtype prot -taxid_map ../../taxdb/gi_taxid_prot.dmp 2> $CAT".log"
+
+CAT="BCT"
+blastdbcmd -entry all -ctrl_a -db swissprot -dbtype prot | python ../../bin/db_splitter.py ../../bin/swissprot.headers $CAT | makeblastdb -title "swissprot."$CAT -parse_seqids -out ../swissprot.split/"swissprot."$CAT -dbtype prot -taxid_map ../../taxdb/gi_taxid_prot.dmp 2> $CAT".log"
+
+CAT="VRL"
+blastdbcmd -entry all -ctrl_a -db swissprot -dbtype prot | python ../../bin/db_splitter.py ../../bin/swissprot.headers $CAT | makeblastdb -title "swissprot."$CAT -parse_seqids -out ../swissprot.split/"swissprot."$CAT -dbtype prot -taxid_map ../../taxdb/gi_taxid_prot.dmp 2> $CAT".log"
+
+CAT="OTR"
+blastdbcmd -entry all -ctrl_a -db swissprot -dbtype prot | python ../../bin/db_splitter.py ../../bin/swissprot.headers $CAT | makeblastdb -title "swissprot."$CAT -parse_seqids -out ../swissprot.split/"swissprot."$CAT -dbtype prot -taxid_map ../../taxdb/gi_taxid_prot.dmp 2> $CAT".log"
+

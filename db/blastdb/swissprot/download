@@ -1,0 +1,12 @@
+#!/bin/sh
+clear
+wget ftp://ftp.ncbi.nih.gov/blast/db/swissprot.*tar.gz
+
+echo ""
+echo "Extracting files..."
+ls swissprot.*tar.gz | while read FILE
+do
+        echo "$FILE"
+        tar -zxf $FILE
+        rm $FILE
+done

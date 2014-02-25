@@ -13,7 +13,8 @@ if (! defined $blastdb || ! defined  $taxdb)
 }
 
 #my $pln = "fastacmd -d$blastdb -D1 -cT";
-my $pln = "blastdbcmd -db $blastdb -outfmt %f -ctrl_a ";
+my $pln = "blastdbcmd -db $blastdb -outfmt %f -ctrl_a -entry all";
+print STDERR "$pln\n";
 my $entries;
 
 print STDERR "INFO: Processing database!\n"; 
